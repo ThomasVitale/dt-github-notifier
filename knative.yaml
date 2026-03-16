@@ -1,0 +1,98 @@
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: dt-github-notifier-secret
+#   namespace: dependency-track
+# type: Opaque
+# Create with:
+#   kubectl create secret generic dt-github-notifier-secret \
+#     --from-literal=github-token=ghp_yourTokenHere \
+#     --from-literal=dt-api-key=yourDTApiKey \
+#     --namespace dependency-track
+# The DT API key only needs VIEW_PORTFOLIO permission (read-only).
+# Do NOT commit real tokens to git.
+
+---
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: dt-github-notifier
+  namespace: dependency-track
+  labels:
+    # cluster-local makes the Knative Service reachable only inside the cluster.
+    # It will NOT be exposed through the external ingress gateway.
+    # URL will be: http://dt-github-notifier.dependency-track.svc.cluster.local
+    networking.knative.dev/visibility: cluster-local
+spec:
+  template:
+    metadata:
+      annotations:
+        # Scale down to zero when no requests are in flight.
+        autoscaling.knative.dev/min-scale: "0"
+        # Never spin up more than 3 replicas — DT sends one webhook at a time.
+        autoscaling.knative.dev/max-scale: "3"
+        # Use concurrency-based autoscaling; spin up a new pod after 10 in-flight requests.
+        autoscaling.knative.dev/target: "10"
+    spec:
+      # Kill the pod if it doesn't respond within 10 s — prevents hung GitHub calls
+      # from blocking the scale-down.
+      timeoutSeconds: 10
+ 
+      # Drop all Linux capabilities — the binary needs none.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532   # nonroot user in cgr.dev/chainguard/static
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+ 
+      containers:
+        - name: bridge
+          # ko replaces this placeholder with the real digest at deploy time.
+          # See Makefile targets: make deploy / make resolve.
+          image: ko://github.com/thomasvitale/dt-github-notifier
+          ports:
+            - name: h2c       # use h2c (HTTP/2 cleartext) — Knative default
+              containerPort: 8080
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: dt-github-notifier-secret
+                  key: github-token
+            # The repo is inferred automatically from each DT project's vcs external
+            # reference, project property (group=github name=repo), or PURL.
+            # Set GITHUB_REPO as a fallback for projects that have none of those.
+            - name: GITHUB_REPO
+              value: ""                 # optional fallback, e.g. "myorg/myrepo"
+            - name: DT_BASE_URL
+              # Internal cluster DNS — same namespace as Dependency-Track.
+              value: "http://dependency-track-apiserver.dependency-track.svc.cluster.local"
+            - name: DT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: dt-github-notifier-secret
+                  key: dt-api-key
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 20m
+              memory: 16Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 15

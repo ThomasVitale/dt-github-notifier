@@ -1,0 +1,26 @@
+# ko configuration for dt-github-notifier
+# https://ko.build/configuration/
+
+# Use Chainguard's static image as base — minimal, no shell, no package manager.
+# It includes CA certificates so the bridge can reach api.github.com over TLS.
+defaultBaseImage: cgr.dev/chainguard/static:latest
+
+# Build linux/amd64 and linux/arm64 by default.
+# Override at build time with: KO_DEFAULTPLATFORMS=linux/amd64,linux/arm64,linux/arm/v7
+defaultPlatforms:
+  - linux/amd64
+  - linux/arm64
+
+# Use --bare naming: image lands exactly at KO_DOCKER_REPO with no suffix appended.
+# Without this, ko appends the binary name and a hash, producing unintended nesting:
+#   ghcr.io/org/dt-github-notifier/dt-github-notifier-<hash>:latest  <- wrong
+#   ghcr.io/org/dt-github-notifier:latest                             <- correct
+defaultImageNamingConvention: bare
+
+builds:
+  - id: bridge
+    main: .
+    ldflags:
+      - -s
+      - -w
+      - -extldflags "-static"
