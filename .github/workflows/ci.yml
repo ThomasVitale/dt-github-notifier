@@ -17,9 +17,6 @@ jobs:
     name: Check, test and build
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      # The image is built but never pushed
-      KO_DOCKER_REPO: ghcr.io/${{ github.repository }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -40,4 +37,9 @@ jobs:
         run: devenv shell -- task test
 
       - name: Build image
-        run: devenv shell -- ko build --push=false --bare --platform=linux/amd64,linux/arm64 .
+        # The image is built but never pushed. Image repositories must be
+        # lowercase, while github.repository keeps the owner's capitalization.
+        run: |
+          KO_DOCKER_REPO="ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          export KO_DOCKER_REPO
+          devenv shell -- ko build --push=false --bare --platform=linux/amd64,linux/arm64 .
