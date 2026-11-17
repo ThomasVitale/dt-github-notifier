@@ -6,7 +6,7 @@ import (
 )
 
 // retryableError marks a transient failure. The webhook handler answers it with
-// 503, which Dependency-Track retries (honouring Retry-After when set).
+// 503, which Dependency-Track retries (honoring Retry-After when set).
 type retryableError struct {
 	err        error
 	retryAfter time.Duration // zero when unknown

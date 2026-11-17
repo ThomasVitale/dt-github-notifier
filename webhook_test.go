@@ -109,7 +109,7 @@ func TestHandleWebhookCreatesIssue(t *testing.T) {
 			h := newWebhookHandler(gh, newTestResolver(gitHubProject(), ""), "")
 
 			rec := httptest.NewRecorder()
-			h.handleWebhook(rec, httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(readFixture(t, tc.fixture))))
+			h.handleWebhook(rec, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/webhook", bytes.NewReader(readFixture(t, tc.fixture))))
 
 			if rec.Code != http.StatusNoContent {
 				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusNoContent, rec.Body)
@@ -284,7 +284,7 @@ func TestHandleWebhookResponses(t *testing.T) {
 			gh, requests := newFakeGitHub(t, tc.ghStatus, tc.ghHeaders)
 			h := newWebhookHandler(gh, newTestResolver(tc.fetcher, tc.defaultRepo), tc.secret)
 
-			req := httptest.NewRequest(tc.method, "/webhook", bytes.NewReader(tc.body))
+			req := httptest.NewRequestWithContext(t.Context(), tc.method, "/webhook", bytes.NewReader(tc.body))
 			if tc.signature != "" {
 				req.Header.Set(signatureHeader, tc.signature)
 			}

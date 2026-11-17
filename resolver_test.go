@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	dtrack "github.com/DependencyTrack/client-go"
@@ -393,5 +395,62 @@ func TestResolve(t *testing.T) {
 				t.Errorf("Resolve() = %q, want %q", got, tc.wantRepo)
 			}
 		})
+	}
+}
+
+// ── dtClientAdapter ───────────────────────────────────────────────────────────
+
+// newFakeDT starts a Dependency-Track API stub serving one project. Until
+// available is set, /api/version fails like an unreachable DT would.
+func newFakeDT(t *testing.T, projectID uuid.UUID, available *atomic.Bool) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/version", func(w http.ResponseWriter, _ *http.Request) {
+		if !available.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(`{"application":"Dependency-Track","version":"5.2.0"}`))
+	})
+	mux.HandleFunc("GET /api/v1/project/"+projectID.String(), func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Api-Key") != "test-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"name":"my-service","externalReferences":[{"type":"vcs","url":"https://github.com/myorg/my-service"}]}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestDTClientAdapterIsCreatedLazily(t *testing.T) {
+	t.Parallel()
+	projectID := uuid.MustParse("aaaaaaaa-0000-0000-0000-000000000001")
+	var available atomic.Bool
+	srv := newFakeDT(t, projectID, &available)
+
+	var created atomic.Int32
+	r := newRepoResolver(func() (*dtrack.Client, error) {
+		created.Add(1)
+		return dtrack.NewClient(srv.URL, dtrack.WithAPIKey("test-key"))
+	}, "")
+
+	// DT unavailable: the failure is retryable and nothing is cached.
+	_, err := r.Resolve(t.Context(), projectID)
+	var retryErr *retryableError
+	if !errors.As(err, &retryErr) {
+		t.Fatalf("Resolve() with DT unavailable error = %v, want retryable error", err)
+	}
+
+	available.Store(true)
+	for range 2 {
+		repo, err := r.Resolve(t.Context(), projectID)
+		if err != nil || repo != "myorg/my-service" {
+			t.Fatalf("Resolve() = %q, %v, want myorg/my-service", repo, err)
+		}
+	}
+	if n := created.Load(); n != 2 {
+		t.Errorf("client created %d times, want 2 (one failed attempt, then reused)", n)
 	}
 }

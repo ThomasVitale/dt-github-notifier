@@ -54,7 +54,7 @@ Dependency-Track REST API in this order:
 
 ### Responses and retries
 
-Dependency-Track retries a webhook that answers with 429, 502, 503 or 504, honouring
+Dependency-Track retries a webhook that answers with 429, 502, 503 or 504, honoring
 `Retry-After`, and gives up on any other error. The service answers accordingly:
 
 | Status | When |
@@ -73,7 +73,7 @@ Dependency-Track retries a webhook that answers with 429, 502, 503 or 504, honou
 
 | Tool | Purpose |
 |---|---|
-| [devenv](https://devenv.sh/getting-started/) | Reproducible development environment (Go, ko, kubectl, Task) |
+| [devenv](https://devenv.sh/getting-started/) | Reproducible development environment (Go, ko, crane, kubectl, Task, golangci-lint, govulncheck, jq) |
 | [direnv](https://direnv.net) (optional) | Activate the devenv shell automatically when entering the directory |
 | Knative Serving | Already installed in your cluster |
 
@@ -180,7 +180,7 @@ With Portfolio Access Control enabled, the key's team also needs access to the p
 
 ---
 
-## Scale-to-zero behaviour
+## Scale-to-zero behavior
 
 The service is configured with min-scale: 0. When idle for ~60 s Knative terminates all
 pods. The Knative Activator wakes the service on the next request (typically 1-2 s for
@@ -204,11 +204,36 @@ Create these labels in your repo before first use:
 
 ---
 
-## Useful commands
+## Development
 
 ```bash
-task build      # compile locally
-task test       # run tests
+task build              # compile locally
+task fmt                # format the code (gofmt + goimports)
+task test               # run unit tests (race detector, shuffled order)
+task test:coverage      # run unit tests and open the coverage report
+task check              # go.mod tidiness, golangci-lint, govulncheck
+task image:update-base  # pin the ko base image to its latest digest
+```
+
+Issue bodies are covered by golden files in `testdata/golden`. After an intended format change,
+regenerate them with `go test -run TestIssueGolden -update` and review the diff.
+
+The parsers and sanitizers of untrusted input have fuzz tests, e.g.:
+
+```bash
+go test -run '^$' -fuzz FuzzRepoFromURL -fuzztime 30s
+```
+
+`task vuln` fails on any vulnerability in code the service calls, except those listed with a
+justification in `.govulncheck-ignore`. It also reports entries that are no longer found, so the
+list doesn't go stale.
+
+CI (`.github/workflows/ci.yml`) runs `task check`, `task test` and an image build inside the same
+devenv environment. Dependabot keeps Go modules and GitHub Actions up to date.
+
+## Deployment commands
+
+```bash
 task push       # build+push image only (no deploy)
 task resolve    # render manifest with real digest (for GitOps)
 task deploy     # build+push+apply

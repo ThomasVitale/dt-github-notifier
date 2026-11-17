@@ -4,13 +4,19 @@
   # https://devenv.sh/packages/
   packages = [
     # Build
+    pkgs.crane
     pkgs.ko
+
+    # Code quality
+    pkgs.golangci-lint
+    pkgs.govulncheck
 
     # Kubernetes
     pkgs.kubectl
 
     # Utilities
     pkgs.go-task
+    pkgs.jq
   ];
 
   # https://devenv.sh/languages/

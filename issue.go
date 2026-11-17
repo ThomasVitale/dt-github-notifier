@@ -94,7 +94,7 @@ func buildNewVulnerableDependencyIssue(s newVulnerableDependencySubject) gitHubI
 	return newIssue(title, body.String(), []string{"security", "vulnerable-dependency", "dependency-track"})
 }
 
-// newIssue neutralises mentions in the title and truncates title and body to
+// newIssue neutralizes mentions in the title and truncates title and body to
 // the lengths GitHub accepts.
 func newIssue(title, body string, labels []string) gitHubIssueRequest {
 	return gitHubIssueRequest{
@@ -155,9 +155,9 @@ func aliasIDs(v vulnerability) string {
 // mention: one not preceded by a word character (so "pkg:npm/a@1.0" is kept).
 var mentionPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_])@([A-Za-z0-9])`)
 
-// neutraliseMentions inserts a zero-width space after such an "@" so that
+// neutralizeMentions inserts a zero-width space after such an "@" so that
 // text coming from Dependency-Track cannot notify GitHub users or teams.
-func neutraliseMentions(s string) string {
+func neutralizeMentions(s string) string {
 	return mentionPattern.ReplaceAllString(s, "${1}@\u200b${2}")
 }
 
@@ -171,10 +171,10 @@ var inlineReplacer = strings.NewReplacer(
 
 // inline makes untrusted text safe for a single-line context such as a title
 // or a Markdown table cell.
-func inline(s string) string { return neutraliseMentions(inlineReplacer.Replace(s)) }
+func inline(s string) string { return neutralizeMentions(inlineReplacer.Replace(s)) }
 
 // block makes untrusted multi-line text safe for the issue body.
-func block(s string) string { return neutraliseMentions(s) }
+func block(s string) string { return neutralizeMentions(s) }
 
 // truncate shortens s to at most limit characters, marking the cut with "…".
 func truncate(s string, limit int) string {

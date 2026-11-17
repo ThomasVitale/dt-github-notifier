@@ -25,14 +25,62 @@ tasks:
       - go build ./...
 
   fmt:
-    desc: Run gofmt
+    desc: Format the code (gofmt + goimports)
     cmds:
-      - go fmt ./...
+      - golangci-lint fmt
 
-  vet:
-    desc: Run go vet
+  # =============================================
+  # Quality
+  # =============================================
+
+  check:
+    desc: Run all static checks (go.mod tidiness, formatting, linters, vulnerabilities)
     cmds:
-      - go vet ./...
+      - task: mod:check
+      - task: lint
+      - task: vuln
+
+  mod:check:
+    desc: Check that go.mod and go.sum are tidy
+    cmds:
+      - go mod tidy -diff
+
+  lint:
+    desc: Run golangci-lint (includes go vet and formatting checks)
+    cmds:
+      - golangci-lint run
+
+  vuln:
+    desc: Scan for known vulnerabilities in dependencies and the Go standard library (honoring .govulncheck-ignore)
+    silent: true
+    cmds:
+      # Fails on vulnerabilities in code the module calls, like plain govulncheck,
+      # except for the OSV IDs accepted in .govulncheck-ignore.
+      - |
+        set -eo pipefail
+        report=$(govulncheck -format json ./...)
+        ignored=$(grep -v -E '^[[:space:]]*(#|$)' .govulncheck-ignore || true)
+        called=$(echo "$report" | jq -r 'select(.finding.trace[0].function) | .finding.osv' | sort -u)
+        failed=0
+        for id in $called; do
+          summary=$(echo "$report" | jq -r --arg id "$id" 'select(.osv.id == $id) | .osv.summary')
+          if echo "$ignored" | grep -qx "$id"; then
+            echo "⚠️  $id (ignored in .govulncheck-ignore): $summary"
+          else
+            echo "❌ $id: $summary (https://pkg.go.dev/vuln/$id)"
+            failed=1
+          fi
+        done
+        for id in $ignored; do
+          if ! echo "$called" | grep -qx "$id"; then
+            echo "ℹ️  $id is no longer reported: remove it from .govulncheck-ignore"
+          fi
+        done
+        if [ "$failed" -ne 0 ]; then
+          echo "Run 'govulncheck ./...' for details."
+          exit 1
+        fi
+        echo "✅ No vulnerabilities in called code (besides ignored ones)"
 
   # =============================================
   # Testing
@@ -41,11 +89,27 @@ tasks:
   test:
     desc: Run unit tests
     cmds:
-      - go test -race ./...
+      - go test -race -shuffle=on ./...
+
+  test:coverage:
+    desc: Run unit tests and open the coverage report
+    cmds:
+      - go test -race -coverprofile=coverage.out ./...
+      - go tool cover -html=coverage.out
 
   # =============================================
   # Image Operations
   # =============================================
+
+  image:update-base:
+    desc: Pin the ko base image in .ko.yaml to the current digest of its tag
+    cmds:
+      - |
+        image=$(sed -n 's/^defaultBaseImage: *//p' .ko.yaml)
+        tag=${image%@*}
+        digest=$(crane digest "$tag")
+        sed -i.bak "s|^defaultBaseImage: .*|defaultBaseImage: $tag@$digest|" .ko.yaml && rm .ko.yaml.bak
+        echo "Base image pinned to $tag@$digest"
 
   push:
     desc: Build multi-arch image and push to registry (no deploy)

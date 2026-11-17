@@ -3,7 +3,8 @@
 
 # Use Chainguard's static image as base — minimal, no shell, no package manager.
 # It includes CA certificates so the bridge can reach api.github.com over TLS.
-defaultBaseImage: cgr.dev/chainguard/static:latest
+# Pinned by digest for reproducible builds; refresh it with: task image:update-base
+defaultBaseImage: cgr.dev/chainguard/static:latest@sha256:fc42af33e643f20d08baf03cddcc1c02ba57052dfb02edb0d79f3fc47bcea8d9
 
 # Build linux/amd64 and linux/arm64 by default.
 # Override at build time with: KO_DEFAULTPLATFORMS=linux/amd64,linux/arm64,linux/arm/v7
@@ -20,7 +21,7 @@ defaultImageNamingConvention: bare
 builds:
   - id: bridge
     main: .
+    # ko builds with CGO_ENABLED=0 and -trimpath, so the binary is already static.
     ldflags:
       - -s
       - -w
-      - -extldflags "-static"

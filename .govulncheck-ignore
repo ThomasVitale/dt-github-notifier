@@ -1,0 +1,8 @@
+# Vulnerabilities reported by govulncheck that `task vuln` (and CI) tolerate.
+# One OSV ID per line. Every entry must say why it is accepted and when to remove it:
+# `task vuln` reports entries that are no longer found, so they can be cleaned up.
+
+# GO-2026-6859: net/http HTTP/1 server crash due to MaxBytesReader header race.
+# Fixed in Go 1.27.4, not yet packaged in nixpkgs (devenv provides Go 1.27.3).
+# Remove once `devenv update` brings Go >= 1.27.4.
+GO-2026-6859
