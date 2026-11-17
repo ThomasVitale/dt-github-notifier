@@ -15,6 +15,8 @@ const (
 	GroupNewVulnerability        = "GROUP_NEW_VULNERABILITY"
 	GroupNewVulnerableDependency = "GROUP_NEW_VULNERABLE_DEPENDENCY"
 	GroupPolicyViolation         = "GROUP_POLICY_VIOLATION"
+	GroupProjectAuditChange      = "GROUP_PROJECT_AUDIT_CHANGE"
+	GroupVulnerabilityRetracted  = "GROUP_VULNERABILITY_RETRACTED"
 )
 
 type Notification struct {
@@ -96,6 +98,36 @@ type PolicyViolationSubject struct {
 	PolicyViolation PolicyViolation `json:"policyViolation"`
 }
 
+// ProjectAuditChangeSubject is the subject of PROJECT_AUDIT_CHANGE
+// notifications. DT sends either a VulnerabilityAnalysisDecisionChangeSubject,
+// with Vulnerability set, or a PolicyViolationAnalysisDecisionChangeSubject,
+// with PolicyViolation set.
+type ProjectAuditChangeSubject struct {
+	Component       Component        `json:"component"`
+	Project         Project          `json:"project"`
+	Vulnerability   *Vulnerability   `json:"vulnerability"`
+	PolicyViolation *PolicyViolation `json:"policyViolation"`
+	Analysis        Analysis         `json:"analysis"`
+}
+
+// Analysis is the audit decision on a vulnerability or policy violation.
+type Analysis struct {
+	// State is one of EXPLOITABLE, IN_TRIAGE, FALSE_POSITIVE, NOT_AFFECTED
+	// and RESOLVED for vulnerabilities, and APPROVED and REJECTED for policy
+	// violations; it may also be NOT_SET or empty.
+	State      string `json:"state"`
+	Suppressed bool   `json:"suppressed"`
+}
+
+// VulnerabilityRetractedSubject is the subject of VULNERABILITY_RETRACTED
+// notifications: a vulnerability previously reported for a component that
+// no longer applies.
+type VulnerabilityRetractedSubject struct {
+	Component     Component     `json:"component"`
+	Project       Project       `json:"project"`
+	Vulnerability Vulnerability `json:"vulnerability"`
+}
+
 // ErrInvalidPayload wraps every error caused by a malformed notification.
 var ErrInvalidPayload = errors.New("invalid notification payload")
 
@@ -116,7 +148,8 @@ func Parse(body []byte) (Notification, error) {
 
 // Subject is the set of subject types of the handled notification groups.
 type Subject interface {
-	NewVulnerabilitySubject | NewVulnerableDependencySubject | PolicyViolationSubject
+	NewVulnerabilitySubject | NewVulnerableDependencySubject | PolicyViolationSubject |
+		ProjectAuditChangeSubject | VulnerabilityRetractedSubject
 }
 
 // DecodeSubject decodes the subject of n into the subject type T.

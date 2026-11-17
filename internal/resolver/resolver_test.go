@@ -3,6 +3,7 @@ package resolver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -686,4 +687,24 @@ func FuzzRepoFromPURL(f *testing.F) {
 			t.Errorf("repoFromPURL(%q) = %q, which is not a valid repo", s, repo)
 		}
 	})
+}
+
+func TestShortenAPIError(t *testing.T) {
+	t.Parallel()
+	long := &dtrack.APIError{StatusCode: http.StatusInternalServerError, Message: strings.Repeat("x", 10_000)}
+	err := shortenAPIError(fmt.Errorf("wrapped: %w", long))
+	if apiStatus(err) != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", apiStatus(err), http.StatusInternalServerError)
+	}
+	if n := len(err.Error()); n > maxAPIErrorMessage+50 {
+		t.Errorf("error message has %d bytes, want about %d", n, maxAPIErrorMessage)
+	}
+
+	other := errors.New("connection refused")
+	if got := shortenAPIError(other); !errors.Is(got, other) {
+		t.Errorf("shortenAPIError() changed a non-API error: %v", got)
+	}
+	if shortenAPIError(nil) != nil {
+		t.Error("shortenAPIError(nil) is not nil")
+	}
 }

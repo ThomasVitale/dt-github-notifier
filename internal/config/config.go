@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/thomasvitale/dt-github-notifier/internal/github"
 	"github.com/thomasvitale/dt-github-notifier/internal/resolver"
@@ -32,6 +33,9 @@ type Config struct {
 	// AllowUnsignedWebhooks permits running without WebhookSecret, accepting
 	// notifications from anyone able to reach the service.
 	AllowUnsignedWebhooks bool
+	// MaxNotificationAge rejects older notifications, limiting replays of
+	// captured requests; zero disables the check.
+	MaxNotificationAge time.Duration
 
 	Port     string
 	LogLevel slog.Level
@@ -47,6 +51,10 @@ func FromEnv() (Config, error) {
 		WebhookSecret: os.Getenv("DT_WEBHOOK_SECRET"),
 		Port:          os.Getenv("PORT"),
 		RepoSources:   resolver.AllSources,
+		// Dependency-Track makes at most 6 delivery attempts, a few minutes
+		// apart, or as far apart as Retry-After asks (at most an hour, for
+		// GitHub rate limits), so every legitimate retry is younger than this.
+		MaxNotificationAge: 24 * time.Hour,
 	}
 
 	if cfg.GitHubToken == "" {
@@ -103,6 +111,11 @@ func FromEnv() (Config, error) {
 	}
 	if cfg.AllowPublicRepos, err = parseBool("ALLOW_PUBLIC_REPOS"); err != nil {
 		return Config{}, err
+	}
+	if age := os.Getenv("MAX_NOTIFICATION_AGE"); age != "" {
+		if cfg.MaxNotificationAge, err = time.ParseDuration(age); err != nil || cfg.MaxNotificationAge < 0 {
+			return Config{}, fmt.Errorf("MAX_NOTIFICATION_AGE %q is not a duration such as 24h, or 0 to disable the check", age)
+		}
 	}
 
 	if cfg.Port == "" {

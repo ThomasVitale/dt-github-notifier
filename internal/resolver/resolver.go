@@ -72,7 +72,8 @@ func (a *dtClientAdapter) getProject(ctx context.Context, id uuid.UUID) (dtrack.
 	if err != nil {
 		return dtrack.Project{}, err
 	}
-	return c.Project.Get(ctx, id)
+	p, err := c.Project.Get(ctx, id)
+	return p, shortenAPIError(err)
 }
 
 func (a *dtClientAdapter) getProperties(ctx context.Context, id uuid.UUID) ([]dtrack.ProjectProperty, error) {
@@ -82,9 +83,27 @@ func (a *dtClientAdapter) getProperties(ctx context.Context, id uuid.UUID) ([]dt
 	}
 	page, err := c.ProjectProperty.GetAll(ctx, id, dtrack.PageOptions{PageSize: 100})
 	if err != nil {
-		return nil, err
+		return nil, shortenAPIError(err)
 	}
 	return page.Items, nil
+}
+
+// maxAPIErrorMessage bounds the part of a Dependency-Track error response
+// kept in errors, which end up in logs.
+const maxAPIErrorMessage = 200
+
+// shortenAPIError truncates the message of a Dependency-Track API error,
+// which holds the whole response body, keeping its status code.
+func shortenAPIError(err error) error {
+	var apiErr *dtrack.APIError
+	if !errors.As(err, &apiErr) {
+		return err
+	}
+	msg := strings.ToValidUTF8(apiErr.Message, "")
+	if r := []rune(msg); len(r) > maxAPIErrorMessage {
+		msg = string(r[:maxAPIErrorMessage]) + "…"
+	}
+	return &dtrack.APIError{StatusCode: apiErr.StatusCode, Message: msg}
 }
 
 // Resolver resolves a GitHub "org/repo" string from a Dependency-Track project.

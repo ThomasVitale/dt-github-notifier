@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -133,12 +134,12 @@ func TestCreateIssue(t *testing.T) {
 					w.Header().Set(k, v)
 				}
 				w.WriteHeader(tc.status)
-				_ = json.NewEncoder(w).Encode(map[string]string{"message": tc.message, "html_url": "https://github.com/myorg/myrepo/issues/1"})
+				_ = json.NewEncoder(w).Encode(map[string]any{"message": tc.message, "number": 1, "html_url": "https://github.com/myorg/myrepo/issues/1"})
 			}))
 			defer srv.Close()
 
 			c := New(srv.URL+"/", "test-token")
-			url, err := c.CreateIssue(t.Context(), tc.repo, issue.Issue{Title: "t", Body: "b", Labels: []string{"l"}})
+			ref, err := c.CreateIssue(t.Context(), tc.repo, issue.Issue{Title: "t", Body: "b", Labels: []string{"l"}})
 
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("CreateIssue() error = %v, wantErr %v", err, tc.wantErr)
@@ -159,8 +160,8 @@ func TestCreateIssue(t *testing.T) {
 			if got.body.Title != "t" || got.body.Body != "b" || len(got.body.Labels) != 1 {
 				t.Errorf("request body = %+v", got.body)
 			}
-			if !tc.wantErr && url != "https://github.com/myorg/myrepo/issues/1" {
-				t.Errorf("CreateIssue() URL = %q", url)
+			if want := (issue.Ref{Number: 1, URL: "https://github.com/myorg/myrepo/issues/1"}); !tc.wantErr && ref != want {
+				t.Errorf("CreateIssue() = %+v, want %+v", ref, want)
 			}
 		})
 	}
@@ -173,15 +174,15 @@ func TestFindOpenIssue(t *testing.T) {
 		status    int
 		response  string
 		headers   map[string]string
-		want      string
+		want      issue.Ref
 		wantErr   bool
 		wantRetry bool
 	}{
 		{
 			name:     "found",
 			status:   http.StatusOK,
-			response: `{"total_count":1,"items":[{"html_url":"https://github.com/myorg/myrepo/issues/7"}]}`,
-			want:     "https://github.com/myorg/myrepo/issues/7",
+			response: `{"total_count":1,"items":[{"number":7,"html_url":"https://github.com/myorg/myrepo/issues/7"}]}`,
+			want:     issue.Ref{Number: 7, URL: "https://github.com/myorg/myrepo/issues/7"},
 		},
 		{
 			name:     "not found",
@@ -227,7 +228,7 @@ func TestFindOpenIssue(t *testing.T) {
 				t.Errorf("FindOpenIssue() retryable = %v, want %v", retry, tc.wantRetry)
 			}
 			if got != tc.want {
-				t.Errorf("FindOpenIssue() = %q, want %q", got, tc.want)
+				t.Errorf("FindOpenIssue() = %+v, want %+v", got, tc.want)
 			}
 			if wantQuery := `repo:myorg/myrepo is:issue is:open in:body "dtgn-0123"`; gotPath != "/search/issues" || gotQuery != wantQuery {
 				t.Errorf("request path = %q, q = %q, want /search/issues, %q", gotPath, gotQuery, wantQuery)
@@ -316,5 +317,47 @@ func TestIsPublicErrors(t *testing.T) {
 	}
 	if _, err := c.IsPublic(t.Context(), "../evil"); err == nil {
 		t.Error("IsPublic() of an invalid repo succeeded, want an error")
+	}
+}
+
+func TestCloseIssue(t *testing.T) {
+	t.Parallel()
+	type request struct {
+		method, path string
+		body         map[string]string
+	}
+	var requests []request
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		req := request{method: r.Method, path: r.URL.Path}
+		_ = json.NewDecoder(r.Body).Decode(&req.body)
+		requests = append(requests, req)
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusCreated)
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "test-token")
+	err := c.CloseIssue(t.Context(), "myorg/myrepo", 7, issue.Closure{Comment: "why", Reason: issue.ReasonNotPlanned})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []request{
+		{method: http.MethodPost, path: "/repos/myorg/myrepo/issues/7/comments", body: map[string]string{"body": "why"}},
+		{method: http.MethodPatch, path: "/repos/myorg/myrepo/issues/7", body: map[string]string{"state": "closed", "state_reason": "not_planned"}},
+	}
+	if !reflect.DeepEqual(requests, want) {
+		t.Errorf("requests = %+v, want %+v", requests, want)
+	}
+
+	for _, bad := range []struct {
+		repo   string
+		number int
+	}{{"../evil", 7}, {"myorg/myrepo", 0}} {
+		if err := c.CloseIssue(t.Context(), bad.repo, bad.number, issue.Closure{}); err == nil {
+			t.Errorf("CloseIssue(%q, %d) succeeded, want an error", bad.repo, bad.number)
+		}
 	}
 }

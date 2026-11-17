@@ -112,8 +112,9 @@ func newHandler(cfg config.Config) http.Handler {
 
 	mux := http.NewServeMux()
 	mux.Handle("/webhook", webhook.New(issues, repos, webhook.Options{
-		Secret:           cfg.WebhookSecret,
-		AllowPublicRepos: cfg.AllowPublicRepos,
+		Secret:             cfg.WebhookSecret,
+		AllowPublicRepos:   cfg.AllowPublicRepos,
+		MaxNotificationAge: cfg.MaxNotificationAge,
 	}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))

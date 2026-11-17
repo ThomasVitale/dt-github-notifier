@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thomasvitale/dt-github-notifier/internal/github"
 	"github.com/thomasvitale/dt-github-notifier/internal/resolver"
@@ -13,7 +14,7 @@ import (
 var envVars = []string{
 	"GITHUB_TOKEN", "GITHUB_REPO", "GITHUB_API_URL", "GITHUB_ALLOWED_REPOS", "ALLOW_PUBLIC_REPOS",
 	"REPO_SOURCES", "DT_BASE_URL", "DT_API_KEY", "DT_WEBHOOK_SECRET", "ALLOW_UNSIGNED_WEBHOOKS",
-	"PORT", "LOG_LEVEL",
+	"MAX_NOTIFICATION_AGE", "PORT", "LOG_LEVEL",
 }
 
 func TestFromEnv(t *testing.T) {
@@ -41,14 +42,15 @@ func TestFromEnv(t *testing.T) {
 		{
 			name: "defaults",
 			want: Config{
-				GitHubToken:   "ghp_x",
-				GitHubAPIURL:  "https://api.github.com",
-				AllowedRepos:  mustAllowlist("myorg/*"),
-				RepoSources:   resolver.AllSources,
-				DTBaseURL:     "http://dt.example:8080",
-				DTAPIKey:      "key",
-				WebhookSecret: "s3cr3t",
-				Port:          "8080",
+				GitHubToken:        "ghp_x",
+				GitHubAPIURL:       "https://api.github.com",
+				AllowedRepos:       mustAllowlist("myorg/*"),
+				RepoSources:        resolver.AllSources,
+				DTBaseURL:          "http://dt.example:8080",
+				DTAPIKey:           "key",
+				WebhookSecret:      "s3cr3t",
+				MaxNotificationAge: 24 * time.Hour,
+				Port:               "8080",
 			},
 		},
 		{
@@ -61,6 +63,7 @@ func TestFromEnv(t *testing.T) {
 				"REPO_SOURCES":            "property",
 				"DT_WEBHOOK_SECRET":       "",
 				"ALLOW_UNSIGNED_WEBHOOKS": "true",
+				"MAX_NOTIFICATION_AGE":    "0",
 				"PORT":                    "9090",
 				"LOG_LEVEL":               "DEBUG",
 			},
@@ -96,6 +99,8 @@ func TestFromEnv(t *testing.T) {
 		{name: "missing DT API key", env: map[string]string{"DT_API_KEY": ""}, wantErr: "DT_API_KEY"},
 		{name: "missing webhook secret", env: map[string]string{"DT_WEBHOOK_SECRET": ""}, wantErr: "DT_WEBHOOK_SECRET"},
 		{name: "invalid boolean", env: map[string]string{"ALLOW_PUBLIC_REPOS": "yes please"}, wantErr: "ALLOW_PUBLIC_REPOS"},
+		{name: "invalid notification age", env: map[string]string{"MAX_NOTIFICATION_AGE": "1 day"}, wantErr: "MAX_NOTIFICATION_AGE"},
+		{name: "negative notification age", env: map[string]string{"MAX_NOTIFICATION_AGE": "-1h"}, wantErr: "MAX_NOTIFICATION_AGE"},
 		{name: "invalid log level", env: map[string]string{"LOG_LEVEL": "verbose"}, wantErr: "LOG_LEVEL"},
 	}
 

@@ -1,0 +1,85 @@
+{
+  "notification": {
+    "id": "010ba7f2-ab4a-73b6-a87d-7b9041d17016",
+    "level": "LEVEL_INFORMATIONAL",
+    "scope": "SCOPE_PORTFOLIO",
+    "group": "GROUP_PROJECT_AUDIT_CHANGE",
+    "timestamp": "2006-06-06T06:06:06.666Z",
+    "title": "Violation Analysis Decision: Violation Suppressed",
+    "content": "An violation analysis decision was made to a policy violation affecting a project",
+    "subject": {
+      "component": {
+        "uuid": "94f87321-a5d1-4c2f-b2fe-95165debebc6",
+        "name": "componentName",
+        "version": "componentVersion"
+      },
+      "project": {
+        "uuid": "c9c9539a-e381-4b36-ac52-6a7ab83b2c95",
+        "name": "projectName",
+        "version": "projectVersion",
+        "description": "projectDescription",
+        "purl": "pkg:maven/org.acme/projectName@projectVersion",
+        "tags": [
+          "tag1",
+          "tag2"
+        ],
+        "isActive": true
+      },
+      "policyViolation": {
+        "uuid": "26ca4bdc-ca15-4aee-a4be-75d5524c3572",
+        "type": "OPERATIONAL",
+        "timestamp": "2006-06-06T06:06:06.666Z",
+        "condition": {
+          "uuid": "61545b13-833e-44ed-aed1-717d7e15d530",
+          "subject": "PACKAGE_URL",
+          "operator": "IS",
+          "value": "pkg:maven/foo/bar@1.2.3",
+          "policy": {
+            "uuid": "508cf29c-0216-479d-8975-35c9c6496932",
+            "name": "policyName",
+            "violationState": "FAIL"
+          }
+        },
+        "message": "Package URL pkg:maven/foo/bar@1.2.3 is not allowed"
+      },
+      "analysis": {
+        "component": {
+          "uuid": "94f87321-a5d1-4c2f-b2fe-95165debebc6",
+          "name": "componentName",
+          "version": "componentVersion"
+        },
+        "project": {
+          "uuid": "c9c9539a-e381-4b36-ac52-6a7ab83b2c95",
+          "name": "projectName",
+          "version": "projectVersion",
+          "description": "projectDescription",
+          "purl": "pkg:maven/org.acme/projectName@projectVersion",
+          "tags": [
+            "tag1",
+            "tag2"
+          ],
+          "isActive": true
+        },
+        "policyViolation": {
+          "uuid": "26ca4bdc-ca15-4aee-a4be-75d5524c3572",
+          "type": "OPERATIONAL",
+          "timestamp": "2006-06-06T06:06:06.666Z",
+          "condition": {
+            "uuid": "61545b13-833e-44ed-aed1-717d7e15d530",
+            "subject": "PACKAGE_URL",
+            "operator": "IS",
+            "value": "pkg:maven/foo/bar@1.2.3",
+            "policy": {
+              "uuid": "508cf29c-0216-479d-8975-35c9c6496932",
+              "name": "policyName",
+              "violationState": "FAIL"
+            }
+          },
+          "message": "Package URL pkg:maven/foo/bar@1.2.3 is not allowed"
+        },
+        "state": "REJECTED",
+        "suppressed": true
+      }
+    }
+  }
+}

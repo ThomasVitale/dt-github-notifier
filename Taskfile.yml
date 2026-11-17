@@ -110,6 +110,12 @@ tasks:
   # Image Operations
   # =============================================
 
+  deps:update:
+    desc: Update the devenv inputs (Go and the other tools) and pin the ko base image to its latest digest
+    cmds:
+      - devenv update
+      - task: image:update-base
+
   image:update-base:
     desc: Pin the ko base image in .ko.yaml to the current digest of its tag
     cmds:

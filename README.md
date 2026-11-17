@@ -28,11 +28,27 @@ and cluster-local visibility (never exposed to the public internet).
 
 ## Notification groups handled
 
+These groups open an issue:
+
 | DT Group | GitHub labels |
 |---|---|
 | `POLICY_VIOLATION` | `security`, `policy-violation`, `dependency-track`, `violation-state:<state>` |
 | `NEW_VULNERABILITY` | `security`, `vulnerability`, `dependency-track`, `severity:<level>` |
 | `NEW_VULNERABLE_DEPENDENCY` | `security`, `vulnerable-dependency`, `dependency-track` |
+
+These groups close the open issue about a finding once it no longer needs action, with a comment
+explaining why:
+
+| DT Group | Closes the issue when | Closed as |
+|---|---|---|
+| `PROJECT_AUDIT_CHANGE` | a vulnerability is analyzed as `RESOLVED` | completed |
+| `PROJECT_AUDIT_CHANGE` | a vulnerability is analyzed as `NOT_AFFECTED` or `FALSE_POSITIVE`, or suppressed | not planned |
+| `PROJECT_AUDIT_CHANGE` | a policy violation is analyzed as `APPROVED`, or suppressed | not planned |
+| `VULNERABILITY_RETRACTED` | a reported vulnerability no longer applies to the component | not planned |
+
+Other audit decisions (`IN_TRIAGE`, `EXPLOITABLE`, `REJECTED`) leave the issue open. Issues opened
+for `NEW_VULNERABLE_DEPENDENCY` cover several vulnerabilities at once, so they are not closed
+automatically. A new notification for a finding whose issue was closed opens a new issue.
 
 All other groups are acknowledged and ignored (HTTP 204).
 
@@ -86,7 +102,7 @@ Dependency-Track retries a webhook that answers with 429, 502, 503 or 504, honor
 
 | Status | When |
 |---|---|
-| 204 | Issue created or already open, or notification group not handled |
+| 204 | Issue created, already open or closed; nothing to do; or notification group not handled |
 | 400 | Malformed payload |
 | 401 | Missing or invalid signature (when `DT_WEBHOOK_SECRET` is set) |
 | 413 | Payload larger than 10 MiB |
@@ -130,6 +146,7 @@ All tasks are defined in `Taskfile.yml` and run with [Task](https://taskfile.dev
 | `DT_WEBHOOK_SECRET` | Yes | Signing secret of the Dependency-Track webhook alert, used to verify `X-Webhook-Signature` |
 | `ALLOW_UNSIGNED_WEBHOOKS` | No | Set to `true` to run without `DT_WEBHOOK_SECRET`, e.g. with Dependency-Track < 5.2 (default: `false`) |
 | `PORT` | No | Listen port (default: 8080) |
+| `MAX_NOTIFICATION_AGE` | No | Notifications whose ID (a UUIDv7, embedding its creation time) is older are rejected, limiting replays of captured requests; `0` disables the check (default: `24h`) |
 | `LOG_LEVEL` | No | `debug`, `info`, `warn` or `error` (default: `info`); logs are JSON on stderr |
 
 ---
@@ -228,7 +245,8 @@ In Administration → Notifications → Alerts, create an alert
 - Level: INFORMATIONAL
 - Publisher: Webhook (default template, *Publish Protobuf* disabled)
 - Trigger: Event
-- Groups: POLICY_VIOLATION, NEW_VULNERABILITY, NEW_VULNERABLE_DEPENDENCY
+- Groups: POLICY_VIOLATION, NEW_VULNERABILITY, NEW_VULNERABLE_DEPENDENCY, and, to close issues
+  automatically, PROJECT_AUDIT_CHANGE and VULNERABILITY_RETRACTED
 - Destination URL: http://dt-github-notifier.dependency-track.svc.cluster.local/webhook
 - Signing Secret (Dependency-Track 5.2+): a managed secret holding the same value as `DT_WEBHOOK_SECRET`
 
@@ -303,8 +321,11 @@ data that anyone able to upload a BOM can influence. It is designed to fail clos
 - **Kubernetes**: the container runs as non-root with a read-only root filesystem and no
   capabilities, and no service account token is mounted, since the service never calls the
   Kubernetes API.
+- **Replays**: Dependency-Track's signature has no timestamp, so notifications older than
+  `MAX_NOTIFICATION_AGE` (by the time embedded in their ID) are rejected, and deduplication keeps a
+  replayed notification from opening a second issue while the first is open.
 - **Logs**: secrets are never logged. Logs contain notification titles, repositories, issue URLs
-  and the source address of rejected requests.
+  and the source address of rejected requests; Dependency-Track error responses are truncated.
 
 ## Project structure
 
@@ -330,6 +351,7 @@ task test               # run unit tests (race detector, shuffled order)
 task test:coverage      # run unit tests and open the coverage report
 task check              # go.mod tidiness, golangci-lint, govulncheck
 task image:update-base  # pin the ko base image to its latest digest
+task deps:update        # update the devenv inputs and pin the base image (both)
 ```
 
 Issue bodies are rendered from the templates in `internal/issue/templates` and covered by golden
@@ -348,8 +370,14 @@ list doesn't go stale.
 
 CI (`.github/workflows/ci.yml`) only calls Task tasks, inside the same devenv environment as local
 development: `task check`, `task test` and `task image:build PUSH=false` on every change, then
-`image:build`, `image:sign` and `release:manifest` to publish. Dependabot keeps Go modules and
-GitHub Actions up to date.
+`image:build`, `image:sign` and `release:manifest` to publish.
+
+Dependabot keeps Go modules and GitHub Actions up to date. A weekly workflow
+(`.github/workflows/update.yml`) runs `task deps:update` for the rest (the devenv inputs, including
+Go, and the base image digest), verifies the result with `task check` and `task test`, and opens a
+pull request. It requires "Allow GitHub Actions to create and approve pull requests" in the
+repository settings. Pull requests opened by GitHub Actions do not trigger CI: close and reopen
+them to run it.
 
 ## Deployment commands
 

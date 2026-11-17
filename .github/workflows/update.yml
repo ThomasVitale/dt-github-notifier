@@ -1,0 +1,72 @@
+name: Update dependencies
+
+# Dependabot updates Go modules and GitHub Actions. This workflow updates what
+# it cannot: the devenv inputs in devenv.lock (Go and the other tools) and the
+# ko base image digest in .ko.yaml.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1' # Mondays, 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-dependencies
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Update devenv and base image
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: write      # push the update branch
+      pull-requests: write # open the pull request
+    steps:
+      - name: Check out source code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+
+      - name: Install devenv
+        # Pinned to the nixpkgs revision locked in devenv.lock
+        run: nix profile add "github:NixOS/nixpkgs/$(jq -r '.nodes."nixpkgs-src".locked.rev' devenv.lock)#devenv"
+
+      - name: Build devenv shell
+        run: devenv test
+
+      - name: Update devenv inputs and base image
+        shell: devenv shell bash -- -e {0}
+        run: task deps:update
+
+      # Pull requests opened with the workflow token do not trigger the CI
+      # workflow, so the updated toolchain is verified here.
+      - name: Run static checks
+        shell: devenv shell bash -- -e {0}
+        run: task check
+
+      - name: Run tests
+        shell: devenv shell bash -- -e {0}
+        run: task test
+
+      - name: Open pull request
+        uses: peter-evans/create-pull-request@3ffccacd46053766916f087ce41d627c0b8cf2d1 # v8.1.3
+        with:
+          branch: deps/update-devenv-and-base-image
+          delete-branch: true
+          add-paths: |
+            devenv.lock
+            .ko.yaml
+          commit-message: 'build: Update devenv inputs and base image'
+          title: 'build: Update devenv inputs and base image'
+          body: |
+            Updates the devenv inputs (Go and the other development tools) and pins the ko base image to its latest digest.
+
+            `task check` and `task test` passed with the updated toolchain in [the workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}). Pull requests opened by GitHub Actions do not trigger the CI workflow: close and reopen this pull request to run it.
+
+            If `task vuln` reported that an entry of `.govulncheck-ignore` is no longer found, remove it.

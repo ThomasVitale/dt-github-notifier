@@ -40,6 +40,12 @@ type Issue struct {
 	Key string
 }
 
+// Ref identifies an existing GitHub issue.
+type Ref struct {
+	Number int
+	URL    string
+}
+
 // keyPrefix starts every Key, making keys easy to search for.
 const keyPrefix = "dtgn-"
 
@@ -57,7 +63,7 @@ var templates = template.Must(template.New("").Funcs(template.FuncMap{
 
 func ForPolicyViolation(s notification.PolicyViolationSubject) (Issue, error) {
 	policy := s.PolicyViolation.Condition.Policy
-	key := newKey("policy-violation", s.Project.UUID, s.Component.UUID, s.PolicyViolation.Condition.UUID)
+	key := PolicyViolationKey(s.Project, s.Component, s.PolicyViolation)
 	return render("policy_violation.md.tmpl", s, key,
 		fmt.Sprintf("[DT] Policy Violation: %s in %s", policy.Name, projectName(s.Project)),
 		[]string{
@@ -70,7 +76,7 @@ func ForPolicyViolation(s notification.PolicyViolationSubject) (Issue, error) {
 
 func ForNewVulnerability(s notification.NewVulnerabilitySubject) (Issue, error) {
 	v := s.Vulnerability
-	key := newKey("new-vulnerability", s.Project.UUID, s.Component.UUID, v.Source, v.VulnID)
+	key := VulnerabilityKey(s.Project, s.Component, v)
 	return render("new_vulnerability.md.tmpl", s, key,
 		fmt.Sprintf("[DT] %s (%s) in %s", v.VulnID, v.Severity, componentName(s.Component)),
 		[]string{
@@ -103,6 +109,18 @@ func render(name string, data any, key, title string, labels []string) (Issue, e
 		Labels: labels,
 		Key:    key,
 	}, nil
+}
+
+// VulnerabilityKey returns the Key of the issue about a vulnerability in a
+// component of a project.
+func VulnerabilityKey(p notification.Project, c notification.Component, v notification.Vulnerability) string {
+	return newKey("new-vulnerability", p.UUID, c.UUID, v.Source, v.VulnID)
+}
+
+// PolicyViolationKey returns the Key of the issue about a policy violation
+// by a component of a project.
+func PolicyViolationKey(p notification.Project, c notification.Component, v notification.PolicyViolation) string {
+	return newKey("policy-violation", p.UUID, c.UUID, v.Condition.UUID)
 }
 
 // newKey derives a Key from the notification group and the identifiers of

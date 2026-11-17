@@ -1,5 +1,5 @@
 // Package webhook receives Dependency-Track notifications and turns them into
-// GitHub issues.
+// GitHub issues, closing them again once the findings are resolved.
 package webhook
 
 import (
@@ -43,25 +43,33 @@ const (
 	// lag of GitHub's search index; recentIssuesMax bounds the memory used.
 	recentIssuesTTL = 15 * time.Minute
 	recentIssuesMax = 10_000
+
+	// maxClockSkew is how far in the future a notification timestamp may be.
+	maxClockSkew = 5 * time.Minute
 )
 
 var (
 	// errUnhandledGroup is returned for notification groups that create no issue.
 	errUnhandledGroup = errors.New("unhandled notification group")
+	// errNothingToDo is returned for notifications that need no change, such as
+	// an audit decision that leaves a finding open.
+	errNothingToDo = errors.New("nothing to do")
 	// errPublicRepo is returned when the resolved repo is public and public
 	// repos are not allowed.
 	errPublicRepo = errors.New("refusing to disclose vulnerability details in a public repository")
 )
 
-// IssueTracker finds and creates GitHub issues.
+// IssueTracker finds, creates and closes GitHub issues.
 type IssueTracker interface {
 	// IsPublic reports whether the repo is publicly visible.
 	IsPublic(ctx context.Context, repo string) (bool, error)
-	// FindOpenIssue returns the URL of an open issue whose body contains key,
-	// or "" when there is none.
-	FindOpenIssue(ctx context.Context, repo, key string) (string, error)
-	// CreateIssue creates the issue and returns its URL.
-	CreateIssue(ctx context.Context, repo string, i issue.Issue) (string, error)
+	// FindOpenIssue returns an open issue whose body contains key, or the
+	// zero Ref when there is none.
+	FindOpenIssue(ctx context.Context, repo, key string) (issue.Ref, error)
+	// CreateIssue creates the issue.
+	CreateIssue(ctx context.Context, repo string, i issue.Issue) (issue.Ref, error)
+	// CloseIssue comments on the issue and closes it.
+	CloseIssue(ctx context.Context, repo string, number int, c issue.Closure) error
 }
 
 // RepoResolver resolves the GitHub "owner/repo" of a Dependency-Track project.
@@ -69,12 +77,17 @@ type RepoResolver interface {
 	Resolve(ctx context.Context, projectUUID uuid.UUID) (string, error)
 }
 
-// Handler creates a GitHub issue for each Dependency-Track notification,
-// unless an open issue already tracks the same finding (see issue.Issue.Key).
+// Handler turns Dependency-Track notifications into GitHub issues:
+//   - NEW_VULNERABILITY, NEW_VULNERABLE_DEPENDENCY and POLICY_VIOLATION create
+//     an issue, unless an open issue already tracks the same finding (see
+//     issue.Issue.Key)
+//   - PROJECT_AUDIT_CHANGE and VULNERABILITY_RETRACTED close the open issue
+//     about the finding, when the audit decision or retraction resolves it
 //
 // Response codes follow the retry semantics of the DT webhook publisher, which
 // retries 429, 502, 503 and 504 and gives up on any other non-2xx status:
-//   - 204 when the issue was created or already exists, or the group is not handled
+//   - 204 when the notification was handled, needs no change, or its group is
+//     not handled
 //   - 400 / 401 / 413 / 422 for requests that will never succeed (422 when no
 //     repo can be resolved or it is public and public repos are not allowed)
 //   - 500 for permanent failures (e.g. GitHub rejected the issue)
@@ -84,7 +97,9 @@ type Handler struct {
 	repos       RepoResolver
 	secret      []byte // empty when signature verification is disabled
 	allowPublic bool
+	maxAge      time.Duration // zero when notification age is not checked
 	timeout     time.Duration
+	now         func() time.Time
 
 	recent   *recentIssues
 	inflight singleflight.Group // collapses concurrent notifications for the same issue
@@ -97,6 +112,10 @@ type Options struct {
 	Secret string
 	// AllowPublicRepos permits creating issues in public repositories.
 	AllowPublicRepos bool
+	// MaxNotificationAge, when not zero, rejects notifications whose ID (a
+	// UUIDv7, which embeds its creation time) is older, limiting replays of
+	// captured requests.
+	MaxNotificationAge time.Duration
 }
 
 // New returns a Handler.
@@ -106,9 +125,18 @@ func New(issues IssueTracker, repos RepoResolver, opts Options) *Handler {
 		repos:       repos,
 		secret:      []byte(opts.Secret),
 		allowPublic: opts.AllowPublicRepos,
+		maxAge:      opts.MaxNotificationAge,
 		timeout:     RequestTimeout,
+		now:         time.Now,
 		recent:      newRecentIssues(recentIssuesTTL, recentIssuesMax),
 	}
+}
+
+// action is what a notification asks for: creating or closing an issue.
+type action struct {
+	project notification.Project
+	create  *issue.Issue
+	close   *issue.Closure
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -144,48 +172,134 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log := slog.With("notificationId", n.ID, "group", n.Group)
+
+	if h.maxAge > 0 {
+		if err := checkAge(n.ID, h.now(), h.maxAge); err != nil {
+			log.Warn("rejecting notification", "err", err, "remoteAddr", r.RemoteAddr)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+	}
+
 	log.Info("received notification", "level", n.Level, "title", n.Title)
 
 	ctx, cancel := context.WithTimeout(r.Context(), h.timeout)
 	defer cancel()
 
-	repo, i, err := h.buildIssue(ctx, n)
-	if errors.Is(err, errUnhandledGroup) {
+	a, err := plan(n)
+	switch {
+	case errors.Is(err, errUnhandledGroup):
 		log.Info("ignoring unhandled notification group")
 		w.WriteHeader(http.StatusNoContent)
 		return
-	}
-	var (
-		url     string
-		created bool
-	)
-	if err == nil {
-		url, created, err = h.ensureIssue(ctx, repo, i)
-	}
-	if err != nil {
-		writeError(w, log.With("repo", repo, "title", i.Title), err)
+	case errors.Is(err, errNothingToDo):
+		log.Info("audit decision leaves the finding open, nothing to do")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	case err != nil:
+		writeError(w, log, err)
 		return
 	}
 
-	if created {
-		log.Info("created GitHub issue", "repo", repo, "title", i.Title, "url", url)
+	repo, err := h.resolve(ctx, a.project)
+	if err != nil {
+		writeError(w, log, err)
+		return
+	}
+	log = log.With("repo", repo)
+
+	if a.create != nil {
+		ref, created, err := h.ensureIssue(ctx, repo, *a.create)
+		switch {
+		case err != nil:
+			writeError(w, log.With("title", a.create.Title), err)
+			return
+		case created:
+			log.Info("created GitHub issue", "title", a.create.Title, "url", ref.URL)
+		default:
+			log.Info("GitHub issue already exists, skipping", "key", a.create.Key, "url", ref.URL)
+		}
 	} else {
-		log.Info("GitHub issue already exists, skipping", "repo", repo, "key", i.Key, "url", url)
+		ref, err := h.closeIssue(ctx, repo, *a.close)
+		switch {
+		case err != nil:
+			writeError(w, log.With("key", a.close.Key), err)
+			return
+		case ref.Number == 0:
+			log.Info("no open GitHub issue to close", "key", a.close.Key)
+		default:
+			log.Info("closed GitHub issue", "url", ref.URL, "reason", a.close.Reason)
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// plan decodes the notification subject and decides the action to take.
+func plan(n notification.Notification) (action, error) {
+	switch n.Group {
+	case notification.GroupPolicyViolation:
+		s, err := notification.DecodeSubject[notification.PolicyViolationSubject](n)
+		if err != nil {
+			return action{}, err
+		}
+		i, err := issue.ForPolicyViolation(s)
+		return action{project: s.Project, create: &i}, err
+	case notification.GroupNewVulnerability:
+		s, err := notification.DecodeSubject[notification.NewVulnerabilitySubject](n)
+		if err != nil {
+			return action{}, err
+		}
+		i, err := issue.ForNewVulnerability(s)
+		return action{project: s.Project, create: &i}, err
+	case notification.GroupNewVulnerableDependency:
+		s, err := notification.DecodeSubject[notification.NewVulnerableDependencySubject](n)
+		if err != nil {
+			return action{}, err
+		}
+		i, err := issue.ForNewVulnerableDependency(s)
+		return action{project: s.Project, create: &i}, err
+	case notification.GroupProjectAuditChange:
+		s, err := notification.DecodeSubject[notification.ProjectAuditChangeSubject](n)
+		if err != nil {
+			return action{}, err
+		}
+		c, ok := issue.ForProjectAuditChange(s)
+		if !ok {
+			return action{}, errNothingToDo
+		}
+		return action{project: s.Project, close: &c}, nil
+	case notification.GroupVulnerabilityRetracted:
+		s, err := notification.DecodeSubject[notification.VulnerabilityRetractedSubject](n)
+		if err != nil {
+			return action{}, err
+		}
+		c := issue.ForVulnerabilityRetracted(s)
+		return action{project: s.Project, close: &c}, nil
+	default:
+		return action{}, errUnhandledGroup
+	}
+}
+
+// resolve returns the repo of the project a notification concerns.
+func (h *Handler) resolve(ctx context.Context, p notification.Project) (string, error) {
+	projectUUID, err := uuid.Parse(p.UUID)
+	if err != nil {
+		return "", fmt.Errorf("%w: invalid project UUID %q", notification.ErrInvalidPayload, p.UUID)
+	}
+	return h.repos.Resolve(ctx, projectUUID)
+}
+
 // ensureIssue creates the issue unless an open issue with the same key exists
-// in the repo, and returns the URL of the created or existing issue.
-func (h *Handler) ensureIssue(ctx context.Context, repo string, i issue.Issue) (string, bool, error) {
+// in the repo, and returns the created or existing issue.
+func (h *Handler) ensureIssue(ctx context.Context, repo string, i issue.Issue) (issue.Ref, bool, error) {
 	type result struct {
-		url     string
+		ref     issue.Ref
 		created bool
 	}
-	key := repo + " " + i.Key
-	v, err, _ := h.inflight.Do(key, func() (any, error) {
-		if url, ok := h.recent.get(key); ok {
-			return result{url: url}, nil
+	key := recentKey(repo, i.Key)
+	v, err, _ := h.inflight.Do("create "+key, func() (any, error) {
+		if ref, ok := h.recent.get(key); ok {
+			return result{ref: ref}, nil
 		}
 		if !h.allowPublic {
 			public, err := h.issues.IsPublic(ctx, repo)
@@ -196,67 +310,76 @@ func (h *Handler) ensureIssue(ctx context.Context, repo string, i issue.Issue) (
 				return nil, errPublicRepo
 			}
 		}
-		url, err := h.issues.FindOpenIssue(ctx, repo, i.Key)
+		ref, err := h.issues.FindOpenIssue(ctx, repo, i.Key)
 		if err != nil {
 			return nil, fmt.Errorf("search for existing issue: %w", err)
 		}
-		if url != "" {
-			h.recent.add(key, url)
-			return result{url: url}, nil
+		if ref.Number != 0 {
+			h.recent.add(key, ref)
+			return result{ref: ref}, nil
 		}
-		if url, err = h.issues.CreateIssue(ctx, repo, i); err != nil {
+		if ref, err = h.issues.CreateIssue(ctx, repo, i); err != nil {
 			return nil, err
 		}
-		h.recent.add(key, url)
-		return result{url: url, created: true}, nil
+		h.recent.add(key, ref)
+		return result{ref: ref, created: true}, nil
 	})
 	if err != nil {
-		return "", false, err
+		return issue.Ref{}, false, err
 	}
 	r := v.(result)
-	return r.url, r.created, nil
+	return r.ref, r.created, nil
 }
 
-// buildIssue builds the issue for a notification and resolves the repo of
-// the project it concerns.
-func (h *Handler) buildIssue(ctx context.Context, n notification.Notification) (string, issue.Issue, error) {
-	var (
-		p   notification.Project
-		i   issue.Issue
-		err error
-	)
-	switch n.Group {
-	case notification.GroupPolicyViolation:
-		var s notification.PolicyViolationSubject
-		if s, err = notification.DecodeSubject[notification.PolicyViolationSubject](n); err == nil {
-			p = s.Project
-			i, err = issue.ForPolicyViolation(s)
+// closeIssue closes the open issue with the closure's key, and returns it, or
+// the zero Ref when there is no such issue.
+func (h *Handler) closeIssue(ctx context.Context, repo string, c issue.Closure) (issue.Ref, error) {
+	key := recentKey(repo, c.Key)
+	v, err, _ := h.inflight.Do("close "+key, func() (any, error) {
+		// An issue created moments ago may not be returned by search yet.
+		ref, ok := h.recent.get(key)
+		if !ok || ref.Number == 0 {
+			var err error
+			if ref, err = h.issues.FindOpenIssue(ctx, repo, c.Key); err != nil {
+				return nil, fmt.Errorf("search for the issue to close: %w", err)
+			}
+			if ref.Number == 0 {
+				return issue.Ref{}, nil
+			}
 		}
-	case notification.GroupNewVulnerability:
-		var s notification.NewVulnerabilitySubject
-		if s, err = notification.DecodeSubject[notification.NewVulnerabilitySubject](n); err == nil {
-			p = s.Project
-			i, err = issue.ForNewVulnerability(s)
+		if err := h.issues.CloseIssue(ctx, repo, ref.Number, c); err != nil {
+			return nil, err
 		}
-	case notification.GroupNewVulnerableDependency:
-		var s notification.NewVulnerableDependencySubject
-		if s, err = notification.DecodeSubject[notification.NewVulnerableDependencySubject](n); err == nil {
-			p = s.Project
-			i, err = issue.ForNewVulnerableDependency(s)
-		}
-	default:
-		return "", i, errUnhandledGroup
-	}
+		// A later notification about the same finding opens a new issue.
+		h.recent.remove(key)
+		return ref, nil
+	})
 	if err != nil {
-		return "", i, err
+		return issue.Ref{}, err
 	}
+	return v.(issue.Ref), nil
+}
 
-	projectUUID, err := uuid.Parse(p.UUID)
-	if err != nil {
-		return "", i, fmt.Errorf("%w: invalid project UUID %q", notification.ErrInvalidPayload, p.UUID)
+func recentKey(repo, issueKey string) string {
+	return strings.ToLower(repo) + " " + issueKey
+}
+
+// checkAge verifies that the notification ID is a UUIDv7 created no more than
+// maxAge ago (and not in the future, beyond maxClockSkew).
+func checkAge(id string, now time.Time, maxAge time.Duration) error {
+	u, err := uuid.Parse(id)
+	if err != nil || u.Version() != 7 {
+		return fmt.Errorf("notification ID %q is not a UUIDv7, so its age cannot be checked "+
+			"(set MAX_NOTIFICATION_AGE=0 to disable the check)", id)
 	}
-	repo, err := h.repos.Resolve(ctx, projectUUID)
-	return repo, i, err
+	created := time.Unix(u.Time().UnixTime())
+	switch age := now.Sub(created); {
+	case age > maxAge:
+		return fmt.Errorf("notification created at %s is older than %s, the maximum age", created.UTC().Format(time.RFC3339), maxAge)
+	case age < -maxClockSkew:
+		return fmt.Errorf("notification created at %s is in the future", created.UTC().Format(time.RFC3339))
+	}
+	return nil
 }
 
 // writeError maps a processing error to the response status that makes
@@ -281,8 +404,8 @@ func writeError(w http.ResponseWriter, log *slog.Logger, err error) {
 		log.Error("not creating issue: the repository is public (set ALLOW_PUBLIC_REPOS=true to allow it)", "err", err)
 		http.Error(w, "repository is public", http.StatusUnprocessableEntity)
 	default:
-		log.Error("failed to create GitHub issue", "err", err)
-		http.Error(w, "failed to create issue", http.StatusInternalServerError)
+		log.Error("failed to update GitHub issue", "err", err)
+		http.Error(w, "failed to update issue", http.StatusInternalServerError)
 	}
 }
 

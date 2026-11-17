@@ -13,6 +13,12 @@ const (
 	NewVulnerability        = "new_vulnerability"
 	NewVulnerableDependency = "new_vulnerable_dependency"
 	PolicyViolation         = "policy_violation"
+	// Audit decisions and a retraction about the findings of the payloads
+	// above, built like the notifications of Dependency-Track's
+	// TestNotificationFactory: FALSE_POSITIVE and REJECTED, both suppressed.
+	ProjectAuditChangeVulnerability   = "project_audit_change_vulnerability"
+	ProjectAuditChangePolicyViolation = "project_audit_change_policy_violation"
+	VulnerabilityRetracted            = "vulnerability_retracted"
 )
 
 //go:embed payloads/*.json

@@ -1,4 +1,4 @@
-// Package github creates and finds issues through the GitHub REST API.
+// Package github creates, finds and closes issues through the GitHub REST API.
 package github
 
 import (
@@ -102,51 +102,78 @@ func (c *Client) IsPublic(ctx context.Context, repo string) (bool, error) {
 	return public, nil
 }
 
-// CreateIssue creates an issue in the given "owner/repo" and returns its URL.
-// Rate limiting, server errors and network failures are returned as retryable
-// errors.
-func (c *Client) CreateIssue(ctx context.Context, repo string, i issue.Issue) (string, error) {
+// CreateIssue creates an issue in the given "owner/repo". Rate limiting,
+// server errors and network failures are returned as retryable errors.
+func (c *Client) CreateIssue(ctx context.Context, repo string, i issue.Issue) (issue.Ref, error) {
 	if !IsValidRepo(repo) {
-		return "", fmt.Errorf("invalid GitHub repo %q", repo)
+		return issue.Ref{}, fmt.Errorf("invalid GitHub repo %q", repo)
 	}
 
 	payload, err := json.Marshal(issueRequest{Title: i.Title, Body: i.Body, Labels: i.Labels})
 	if err != nil {
-		return "", fmt.Errorf("marshal issue: %w", err)
+		return issue.Ref{}, fmt.Errorf("marshal issue: %w", err)
 	}
 
 	var created struct {
+		Number  int    `json:"number"`
 		HTMLURL string `json:"html_url"`
 	}
 	endpoint := fmt.Sprintf("%s/repos/%s/issues", c.baseURL, repo)
 	if err := c.do(ctx, http.MethodPost, endpoint, payload, http.StatusCreated, &created); err != nil {
-		return "", err
+		return issue.Ref{}, err
 	}
-	return created.HTMLURL, nil
+	return issue.Ref{Number: created.Number, URL: created.HTMLURL}, nil
 }
 
-// FindOpenIssue returns the URL of an open issue in the given "owner/repo"
-// whose body contains key, or "" when there is none. It uses the search API,
+// FindOpenIssue returns an open issue in the given "owner/repo" whose body
+// contains key, or the zero Ref when there is none. It uses the search API,
 // whose index can lag a few seconds behind newly created issues.
-func (c *Client) FindOpenIssue(ctx context.Context, repo, key string) (string, error) {
+func (c *Client) FindOpenIssue(ctx context.Context, repo, key string) (issue.Ref, error) {
 	if !IsValidRepo(repo) {
-		return "", fmt.Errorf("invalid GitHub repo %q", repo)
+		return issue.Ref{}, fmt.Errorf("invalid GitHub repo %q", repo)
 	}
 
 	var result struct {
 		Items []struct {
+			Number  int    `json:"number"`
 			HTMLURL string `json:"html_url"`
 		} `json:"items"`
 	}
 	query := fmt.Sprintf(`repo:%s is:issue is:open in:body "%s"`, repo, key)
 	endpoint := fmt.Sprintf("%s/search/issues?per_page=1&q=%s", c.baseURL, url.QueryEscape(query))
 	if err := c.do(ctx, http.MethodGet, endpoint, nil, http.StatusOK, &result); err != nil {
-		return "", err
+		return issue.Ref{}, err
 	}
-	if len(result.Items) == 0 {
-		return "", nil
+	if len(result.Items) == 0 || result.Items[0].Number <= 0 {
+		return issue.Ref{}, nil
 	}
-	return result.Items[0].HTMLURL, nil
+	return issue.Ref{Number: result.Items[0].Number, URL: result.Items[0].HTMLURL}, nil
+}
+
+// CloseIssue comments on the issue with the closure's explanation, then
+// closes it with the closure's reason.
+func (c *Client) CloseIssue(ctx context.Context, repo string, number int, closure issue.Closure) error {
+	if !IsValidRepo(repo) {
+		return fmt.Errorf("invalid GitHub repo %q", repo)
+	}
+	if number <= 0 {
+		return fmt.Errorf("invalid issue number %d", number)
+	}
+	endpoint := fmt.Sprintf("%s/repos/%s/issues/%d", c.baseURL, repo, number)
+
+	comment, err := json.Marshal(map[string]string{"body": closure.Comment})
+	if err != nil {
+		return fmt.Errorf("marshal comment: %w", err)
+	}
+	if err := c.do(ctx, http.MethodPost, endpoint+"/comments", comment, http.StatusCreated, &struct{}{}); err != nil {
+		return err
+	}
+
+	update, err := json.Marshal(map[string]string{"state": "closed", "state_reason": closure.Reason})
+	if err != nil {
+		return fmt.Errorf("marshal issue update: %w", err)
+	}
+	return c.do(ctx, http.MethodPatch, endpoint, update, http.StatusOK, &struct{}{})
 }
 
 // do sends an API request and decodes the response into out when the status

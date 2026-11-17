@@ -32,6 +32,8 @@ type testService struct {
 	url string
 	// created receives the issue creation requests.
 	created chan gitHubRequest
+	// closed receives the issue close requests.
+	closed chan gitHubRequest
 	// gitHubCalls counts all GitHub API requests.
 	gitHubCalls atomic.Int32
 }
@@ -41,7 +43,7 @@ type testService struct {
 // points to vcsURL, and only myorg/* repositories are allowed.
 func newTestService(t *testing.T, vcsURL string) *testService {
 	t.Helper()
-	s := &testService{created: make(chan gitHubRequest, 2)}
+	s := &testService{created: make(chan gitHubRequest, 2), closed: make(chan gitHubRequest, 2)}
 
 	dt := http.NewServeMux()
 	dt.HandleFunc("GET /api/version", func(w http.ResponseWriter, _ *http.Request) {
@@ -72,7 +74,17 @@ func newTestService(t *testing.T, vcsURL string) *testService {
 		_ = json.NewDecoder(r.Body).Decode(&req.body)
 		s.created <- req
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"html_url":"https://github.com/myorg/my-service/issues/1"}`))
+		_, _ = w.Write([]byte(`{"number":1,"html_url":"https://github.com/myorg/my-service/issues/1"}`))
+	})
+	gitHub.HandleFunc("POST /repos/{owner}/{repo}/issues/{number}/comments", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	gitHub.HandleFunc("PATCH /repos/{owner}/{repo}/issues/{number}", func(w http.ResponseWriter, r *http.Request) {
+		req := gitHubRequest{path: r.URL.Path, auth: r.Header.Get("Authorization")}
+		_ = json.NewDecoder(r.Body).Decode(&req.body)
+		s.closed <- req
+		_, _ = w.Write([]byte(`{}`))
 	})
 	gitHubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.gitHubCalls.Add(1)
@@ -170,5 +182,25 @@ func TestHealthz(t *testing.T) {
 		httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/healthz", nil))
 	if rec.Code != http.StatusOK || rec.Body.String() != "ok" {
 		t.Errorf("GET /healthz = %d %q, want 200 ok", rec.Code, rec.Body)
+	}
+}
+
+// TestEndToEndClose creates an issue, then closes it when Dependency-Track
+// retracts the vulnerability.
+func TestEndToEndClose(t *testing.T) {
+	t.Parallel()
+	s := newTestService(t, "https://github.com/myorg/my-service.git")
+
+	for _, payload := range []string{notificationtest.NewVulnerability, notificationtest.VulnerabilityRetracted} {
+		if status := s.send(t, notificationtest.Payload(t, payload)); status != http.StatusNoContent {
+			t.Fatalf("%s: status = %d, want %d", payload, status, http.StatusNoContent)
+		}
+	}
+	if len(s.created) != 1 || len(s.closed) != 1 {
+		t.Fatalf("created %d and closed %d issues, want 1 and 1", len(s.created), len(s.closed))
+	}
+	got := <-s.closed
+	if got.path != "/repos/myorg/my-service/issues/1" || got.body["state"] != "closed" || got.body["state_reason"] != "not_planned" {
+		t.Errorf("close request = %+v", got)
 	}
 }
