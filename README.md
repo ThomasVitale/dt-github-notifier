@@ -126,7 +126,6 @@ All tasks are defined in `Taskfile.yml` and run with [Task](https://taskfile.dev
 | `DT_WEBHOOK_SECRET` | No (recommended) | Signing secret of the Dependency-Track webhook alert, used to verify `X-Webhook-Signature` |
 | `PORT` | No | Listen port (default: 8080) |
 | `LOG_LEVEL` | No | `debug`, `info`, `warn` or `error` (default: `info`); logs are JSON on stderr |
-| `KO_DOCKER_REPO` | Yes (build) | Registry to push images to |
 
 ---
 
@@ -191,19 +190,21 @@ task status
 
 ### Building and deploying your own image
 
-To deploy local changes, build and push the image to your own registry with ko and apply
-`deploy/knative.yaml` in one step:
+To deploy local changes, build and push the image with ko and apply `deploy/knative.yaml` in one
+step. The image coordinates are Task variables (`REGISTRY`, `IMAGE`, `VERSION`), so you can
+publish to your own registry:
 
 ```bash
 ko login ghcr.io -u $GITHUB_USER --password-stdin <<< $GITHUB_TOKEN
-KO_DOCKER_REPO=ghcr.io/myorg/dt-github-notifier task deploy
+task deploy IMAGE=myorg/dt-github-notifier
 ```
 
-ko cross-compiles for linux/amd64 and linux/arm64, pushes a multi-arch image, substitutes its
-digest into the manifest, and applies it. To render the manifest without applying it:
+ko cross-compiles for linux/amd64 and linux/arm64, pushes a multi-arch image tagged `dev` (`latest`
+is reserved for releases), substitutes its digest into the manifest, and applies it. To render the
+manifest without applying it:
 
 ```bash
-KO_DOCKER_REPO=ghcr.io/myorg/dt-github-notifier task resolve > knative-resolved.yaml
+task resolve IMAGE=myorg/dt-github-notifier > knative-resolved.yaml
 ```
 
 ---
@@ -302,16 +303,20 @@ go test ./internal/resolver -run '^$' -fuzz FuzzRepoFromURL -fuzztime 30s
 justification in `.govulncheck-ignore`. It also reports entries that are no longer found, so the
 list doesn't go stale.
 
-CI (`.github/workflows/ci.yml`) runs `task check`, `task test` and an image build inside the same
-devenv environment. Dependabot keeps Go modules and GitHub Actions up to date.
+CI (`.github/workflows/ci.yml`) only calls Task tasks, inside the same devenv environment as local
+development: `task check`, `task test` and `task image:build PUSH=false` on every change, then
+`image:build`, `image:sign` and `release:manifest` to publish. Dependabot keeps Go modules and
+GitHub Actions up to date.
 
 ## Deployment commands
 
 ```bash
-task push       # build+push image only (no deploy)
-task resolve    # render manifest with real digest (for GitOps)
-task deploy     # build+push+apply
-task undeploy   # remove from cluster
-task status     # show ksvc + pods
-task logs       # tail live logs
+task image:build       # build+push image only (no deploy); PUSH=false only builds it
+task image:sign        # sign the published image with cosign
+task release:manifest  # render deploy/knative.yaml with the published image pinned by digest
+task resolve           # build+push, render manifest with real digest (for GitOps)
+task deploy            # build+push+apply
+task undeploy          # remove from cluster
+task status            # show ksvc + pods
+task logs              # tail live logs
 ```
