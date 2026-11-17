@@ -8,8 +8,11 @@
 #   kubectl create secret generic dt-github-notifier-secret \
 #     --from-literal=github-token=ghp_yourTokenHere \
 #     --from-literal=dt-api-key=yourDTApiKey \
+#     --from-literal=webhook-secret=yourWebhookSigningSecret \
 #     --namespace dependency-track
-# The DT API key only needs VIEW_PORTFOLIO permission (read-only).
+# The DT API key needs the read-only VIEW_PORTFOLIO and PORTFOLIO_MANAGEMENT_READ
+# permissions (the latter to read the github/repo project property).
+# The webhook secret must match the signing secret of the DT webhook alert.
 # Do NOT commit real tokens to git.
 
 ---
@@ -34,14 +37,15 @@ spec:
         # Use concurrency-based autoscaling; spin up a new pod after 10 in-flight requests.
         autoscaling.knative.dev/target: "10"
     spec:
-      # Kill the pod if it doesn't respond within 10 s — prevents hung GitHub calls
-      # from blocking the scale-down.
-      timeoutSeconds: 10
- 
+      # Maximum duration of a request. Kept above the 8 s the bridge allows itself
+      # per notification (Dependency-Track waits 10 s for a webhook response), so
+      # Knative never cuts off a request the bridge is still handling.
+      timeoutSeconds: 30
+
       containers:
         - name: bridge
           # ko replaces this placeholder with the real digest at deploy time.
-          # See Makefile targets: make deploy / make resolve.
+          # See the Taskfile tasks: task deploy / task resolve.
           image: ko://github.com/thomasvitale/dt-github-notifier
           ports:
             - name: http1     # HTTP/1.1 — matches Go's net/http default server
@@ -65,6 +69,14 @@ spec:
                 secretKeyRef:
                   name: dt-github-notifier-secret
                   key: dt-api-key
+            # Verifies the X-Webhook-Signature header sent by Dependency-Track 5.2+.
+            # Optional (the key may be absent), but strongly recommended.
+            - name: DT_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: dt-github-notifier-secret
+                  key: webhook-secret
+                  optional: true
           securityContext:
             runAsNonRoot: true
             allowPrivilegeEscalation: false

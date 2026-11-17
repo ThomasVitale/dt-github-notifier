@@ -27,7 +27,7 @@ tasks:
   fmt:
     desc: Run gofmt
     cmds:
-      - gofmt -w .
+      - go fmt ./...
 
   vet:
     desc: Run go vet
@@ -72,14 +72,19 @@ tasks:
       - kubectl delete -f knative.yaml --ignore-not-found
 
   secret:
-    desc: "Create the GitHub token + DT API key secret (usage: GITHUB_TOKEN=ghp_xxx DT_API_KEY=xxx task secret)"
+    desc: "Create the GitHub token + DT API key (+ optional webhook signing secret) secret (usage: GITHUB_TOKEN=ghp_xxx DT_API_KEY=xxx DT_WEBHOOK_SECRET=xxx task secret)"
     requires:
       vars: [GITHUB_TOKEN, DT_API_KEY]
     cmds:
       - |
+        set --
+        if [ -n "${DT_WEBHOOK_SECRET:-}" ]; then
+          set -- --from-literal=webhook-secret="$DT_WEBHOOK_SECRET"
+        fi
         kubectl create secret generic {{.SERVICE_NAME}}-secret \
           --from-literal=github-token="$GITHUB_TOKEN" \
           --from-literal=dt-api-key="$DT_API_KEY" \
+          "$@" \
           --namespace {{.NAMESPACE}} \
           --dry-run=client -o yaml | kubectl apply -f -
 

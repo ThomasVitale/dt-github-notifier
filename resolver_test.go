@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 
 	dtrack "github.com/DependencyTrack/client-go"
@@ -144,6 +145,17 @@ func TestRepoFromPURL(t *testing.T) {
 			purl:   "pkg:github/myorg",
 			wantOK: false,
 		},
+		{
+			name:   "qualifiers and subpath are dropped",
+			purl:   "pkg:github/myorg/myrepo?arch=amd64#sub/dir",
+			want:   "myorg/myrepo",
+			wantOK: true,
+		},
+		{
+			name:   "path traversal is rejected",
+			purl:   "pkg:github/myorg/..@1.0.0",
+			wantOK: false,
+		},
 	}
 
 	for _, tc := range tests {
@@ -166,13 +178,15 @@ func TestResolve(t *testing.T) {
 	t.Parallel()
 
 	projectID := uuid.MustParse("aaaaaaaa-0000-0000-0000-000000000001")
+	forbidden := &dtrack.APIError{StatusCode: http.StatusForbidden}
 
 	tests := []struct {
 		name        string
 		fetcher     *fakeProjectFetcher
 		defaultRepo string
 		wantRepo    string
-		wantErr     bool
+		wantErr     error // checked with errors.Is
+		wantRetry   bool  // error must be a *retryableError
 	}{
 		{
 			name: "resolves from vcs external reference",
@@ -252,20 +266,43 @@ func TestResolve(t *testing.T) {
 			wantRepo:    "myorg/fallback-repo",
 		},
 		{
-			name: "falls back to default repo when DT API call fails",
+			name: "falls back to default repo when project is not found",
 			fetcher: &fakeProjectFetcher{
-				projectErr: errors.New("connection refused"),
+				projectErr: &dtrack.APIError{StatusCode: http.StatusNotFound},
 			},
 			defaultRepo: "myorg/fallback-repo",
 			wantRepo:    "myorg/fallback-repo",
 		},
 		{
-			name: "returns error when nothing resolves and no default set",
+			name: "transient DT API failure is retryable, not routed to default repo",
+			fetcher: &fakeProjectFetcher{
+				projectErr: errors.New("connection refused"),
+			},
+			defaultRepo: "myorg/fallback-repo",
+			wantRetry:   true,
+		},
+		{
+			name: "DT API server error is retryable",
+			fetcher: &fakeProjectFetcher{
+				projectErr: &dtrack.APIError{StatusCode: http.StatusBadGateway},
+			},
+			wantRetry: true,
+		},
+		{
+			name: "forbidden project is a permanent error",
+			fetcher: &fakeProjectFetcher{
+				projectErr: forbidden,
+			},
+			defaultRepo: "myorg/fallback-repo",
+			wantErr:     forbidden,
+		},
+		{
+			name: "returns errNoRepo when nothing resolves and no default set",
 			fetcher: &fakeProjectFetcher{
 				project: dtrack.Project{Name: "my-service"},
 			},
 			defaultRepo: "",
-			wantErr:     true,
+			wantErr:     errNoRepo,
 		},
 		{
 			name: "vcs ref takes priority over property",
@@ -296,7 +333,18 @@ func TestResolve(t *testing.T) {
 			wantRepo: "myorg/from-property",
 		},
 		{
-			name: "property error falls through to PURL",
+			name: "forbidden properties fall through to PURL",
+			fetcher: &fakeProjectFetcher{
+				project: dtrack.Project{
+					Name: "my-service",
+					PURL: "pkg:github/myorg/my-service@1.0.0",
+				},
+				propsErr: &dtrack.APIError{StatusCode: http.StatusForbidden},
+			},
+			wantRepo: "myorg/my-service",
+		},
+		{
+			name: "transient properties failure is retryable",
 			fetcher: &fakeProjectFetcher{
 				project: dtrack.Project{
 					Name: "my-service",
@@ -304,7 +352,20 @@ func TestResolve(t *testing.T) {
 				},
 				propsErr: errors.New("properties unavailable"),
 			},
-			wantRepo: "myorg/my-service",
+			wantRetry: true,
+		},
+		{
+			name: "invalid property value is ignored",
+			fetcher: &fakeProjectFetcher{
+				project: dtrack.Project{
+					Name: "my-service",
+					PURL: "pkg:github/myorg/from-purl@1.0.0",
+				},
+				properties: []dtrack.ProjectProperty{
+					{Group: "github", Name: "repo", Value: "../../orgs/evil"},
+				},
+			},
+			wantRepo: "myorg/from-purl",
 		},
 	}
 
@@ -313,10 +374,22 @@ func TestResolve(t *testing.T) {
 			t.Parallel()
 			r := newTestResolver(tc.fetcher, tc.defaultRepo)
 			got, err := r.Resolve(context.Background(), projectID)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("Resolve() error = %v, wantErr %v", err, tc.wantErr)
-			}
-			if !tc.wantErr && got != tc.wantRepo {
+			var retryErr *retryableError
+			switch {
+			case tc.wantRetry:
+				if !errors.As(err, &retryErr) {
+					t.Fatalf("Resolve() error = %v, want retryable error", err)
+				}
+			case tc.wantErr != nil:
+				if errors.As(err, &retryErr) {
+					t.Fatalf("Resolve() error = %v is retryable, want permanent", err)
+				}
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("Resolve() error = %v, want %v", err, tc.wantErr)
+				}
+			case err != nil:
+				t.Fatalf("Resolve() unexpected error = %v", err)
+			case got != tc.wantRepo:
 				t.Errorf("Resolve() = %q, want %q", got, tc.wantRepo)
 			}
 		})
