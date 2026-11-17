@@ -1,9 +1,11 @@
 // Package issue renders GitHub issues for Dependency-Track notifications.
 //
 // Issue bodies are Markdown, rendered from the templates in templates/. All
-// values coming from Dependency-Track are untrusted and must go through the
-// cell (single line, e.g. table cells) or text (multi-line) template
-// functions, which neutralize @-mentions and keep the Markdown structure intact.
+// values coming from Dependency-Track are untrusted (they come from BOMs and
+// vulnerability feeds) and must go through the cell (inline code, e.g. table
+// cells) or text (fenced code block) template functions. GitHub renders no
+// links, images, HTML, @-mentions or #references inside code, and the content
+// cannot close the code early.
 package issue
 
 import (
@@ -24,6 +26,10 @@ const (
 	maxBodyLength  = 65536
 )
 
+// maxTextLength bounds each free-text field, so that the fields of an issue
+// fit in maxBodyLength and the body never has to be cut inside a code block.
+const maxTextLength = 16_000
+
 // Issue is a GitHub issue to create.
 type Issue struct {
 	Title  string
@@ -41,8 +47,8 @@ const keyPrefix = "dtgn-"
 var templateFS embed.FS
 
 var templates = template.Must(template.New("").Funcs(template.FuncMap{
-	"cell":          inline,
-	"text":          block,
+	"cell":          codeSpan,
+	"text":          codeBlock,
 	"aliases":       aliasIDs,
 	"cvss":          cvssScore,
 	"componentName": componentName,
@@ -92,7 +98,7 @@ func render(name string, data any, key, title string, labels []string) (Issue, e
 	}
 	footer := fmt.Sprintf("\n> This issue was created automatically by dt-github-notifier (deduplication key: `%s`).\n", key)
 	return Issue{
-		Title:  truncate(inline(title), maxTitleLength),
+		Title:  truncate(plainText(title), maxTitleLength),
 		Body:   truncate(body.String(), maxBodyLength-len([]rune(footer))) + footer,
 		Labels: labels,
 		Key:    key,
@@ -154,26 +160,54 @@ func aliasIDs(v notification.Vulnerability) string {
 // mention: one not preceded by a word character (so "pkg:npm/a@1.0" is kept).
 var mentionPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_])@([A-Za-z0-9])`)
 
-// neutralizeMentions inserts a zero-width space after such an "@" so that
-// text coming from Dependency-Track cannot notify GitHub users or teams.
-func neutralizeMentions(s string) string {
-	return mentionPattern.ReplaceAllString(s, "${1}@\u200b${2}")
+// referencePattern matches a "#" that GitHub would render as a reference to
+// an issue or pull request, such as "#123" or "owner/repo#123".
+var referencePattern = regexp.MustCompile(`#([0-9])`)
+
+// plainText makes untrusted text safe for an issue title: a single line in
+// which @-mentions and #references are neutralized with a zero-width space.
+func plainText(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	s = mentionPattern.ReplaceAllString(s, "${1}@\u200b${2}")
+	return referencePattern.ReplaceAllString(s, "#\u200b${1}")
 }
 
-// inlineReplacer keeps text on a single Markdown table row.
-var inlineReplacer = strings.NewReplacer(
-	"|", "\\|",
-	"\r\n", " ",
-	"\n", " ",
-	"\r", " ",
-)
+// codeSpan renders untrusted text as inline code on a single line, safe for
+// a Markdown table cell (where "|" must be escaped even inside code).
+func codeSpan(s string) string {
+	s = strings.ReplaceAll(strings.Join(strings.Fields(s), " "), "|", "\\|")
+	if s == "" {
+		return ""
+	}
+	delim := strings.Repeat("`", longestRun(s, '`')+1)
+	if strings.HasPrefix(s, "`") || strings.HasSuffix(s, "`") {
+		s = " " + s + " "
+	}
+	return delim + s + delim
+}
 
-// inline makes untrusted text safe for a single-line context such as a title
-// or a Markdown table cell.
-func inline(s string) string { return neutralizeMentions(inlineReplacer.Replace(s)) }
+// codeBlock renders untrusted multi-line text as a fenced code block whose
+// fence is longer than any run of backticks in the text, so that the text
+// cannot close it. Text longer than maxTextLength is truncated.
+func codeBlock(s string) string {
+	s = truncate(strings.TrimRight(strings.ReplaceAll(s, "\r\n", "\n"), "\n"), maxTextLength)
+	fence := strings.Repeat("`", max(3, longestRun(s, '`')+1))
+	return fence + "\n" + s + "\n" + fence
+}
 
-// block makes untrusted multi-line text safe for the issue body.
-func block(s string) string { return neutralizeMentions(s) }
+// longestRun returns the length of the longest run of c in s.
+func longestRun(s string, c rune) int {
+	longest, run := 0, 0
+	for _, r := range s {
+		if r == c {
+			run++
+			longest = max(longest, run)
+		} else {
+			run = 0
+		}
+	}
+	return longest
+}
 
 // truncate shortens s to at most limit characters, marking the cut with "…".
 func truncate(s string, limit int) string {

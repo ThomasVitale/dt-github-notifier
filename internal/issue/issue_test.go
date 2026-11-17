@@ -13,21 +13,45 @@ import (
 	"github.com/thomasvitale/dt-github-notifier/internal/notification/notificationtest"
 )
 
-func TestInline(t *testing.T) {
+func TestPlainText(t *testing.T) {
 	t.Parallel()
-	got := inline("a|b\r\nc\nd @team")
-	want := "a\\|b c d @\u200bteam"
+	got := plainText("a|b\r\nc  @team owner/repo#12 pkg:npm/a@1.0 C#")
+	want := "a|b c @\u200bteam owner/repo#\u200b12 pkg:npm/a@1.0 C#"
 	if got != want {
-		t.Errorf("inline() = %q, want %q", got, want)
+		t.Errorf("plainText() = %q, want %q", got, want)
 	}
 }
 
-func TestBlockNeutralizesMentionsOnly(t *testing.T) {
+func TestCodeSpan(t *testing.T) {
 	t.Parallel()
-	got := block("@admin line1\nping (@octocat) | pkg:npm/lodash@4.17.21 me@example.com")
-	want := "@\u200badmin line1\nping (@\u200boctocat) | pkg:npm/lodash@4.17.21 me@example.com"
-	if got != want {
-		t.Errorf("block() = %q, want %q", got, want)
+	tests := map[string]string{
+		"":                 "",
+		"lodash 4.17.21":   "`lodash 4.17.21`",
+		"a|b\nc":           "`a\\|b c`",
+		"use `x`":          "`` use `x` ``",
+		"`x`":              "`` `x` ``",
+		"[link](http://x)": "`[link](http://x)`",
+	}
+	for in, want := range tests {
+		if got := codeSpan(in); got != want {
+			t.Errorf("codeSpan(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestCodeBlock(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		"line1\r\nline2\n": "```\nline1\nline2\n```",
+		"x\n```\n@team":    "````\nx\n```\n@team\n````",
+	}
+	for in, want := range tests {
+		if got := codeBlock(in); got != want {
+			t.Errorf("codeBlock(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if n := utf8.RuneCountInString(codeBlock(strings.Repeat("x", maxTextLength*2))); n > maxTextLength+8 {
+		t.Errorf("codeBlock() of a long text has %d characters, want at most %d", n, maxTextLength+8)
 	}
 }
 
@@ -60,8 +84,11 @@ func TestIssueSanitizesAndTruncates(t *testing.T) {
 	if n := utf8.RuneCountInString(issue.Title); n != maxTitleLength {
 		t.Errorf("title length = %d, want %d", n, maxTitleLength)
 	}
-	if n := utf8.RuneCountInString(issue.Body); n != maxBodyLength {
-		t.Errorf("body length = %d, want %d", n, maxBodyLength)
+	if n := utf8.RuneCountInString(issue.Body); n > maxBodyLength {
+		t.Errorf("body length = %d, want at most %d", n, maxBodyLength)
+	}
+	if !strings.Contains(issue.Body, "…\n```\n") {
+		t.Error("long description is not truncated inside a closed code block")
 	}
 	if !strings.HasSuffix(issue.Body, "(deduplication key: `"+issue.Key+"`).\n") {
 		t.Errorf("truncated body lost the footer with the key: ...%q", issue.Body[len(issue.Body)-200:])
@@ -193,20 +220,59 @@ func TestGolden(t *testing.T) {
 	}
 }
 
-func FuzzInline(f *testing.F) {
-	for _, s := range []string{"a|b\r\nc", "@team", "(@a(@b", "@@a", "pkg:npm/a@1.0", "x @a @b"} {
+func FuzzPlainText(f *testing.F) {
+	for _, s := range []string{"a\r\nb", "@team", "(@a(@b", "@@a", "pkg:npm/a@1.0", "x#1 #2"} {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
-		got := inline(s)
+		got := plainText(s)
 		if strings.ContainsAny(got, "\r\n") {
-			t.Errorf("inline(%q) = %q contains a line break", s, got)
+			t.Errorf("plainText(%q) = %q contains a line break", s, got)
 		}
-		if strings.Contains(strings.ReplaceAll(got, "\\|", ""), "|") {
-			t.Errorf("inline(%q) = %q contains an unescaped |", s, got)
+		if mentionPattern.MatchString(got) || referencePattern.MatchString(got) {
+			t.Errorf("plainText(%q) = %q still contains a mention or reference", s, got)
 		}
-		if mentionPattern.MatchString(got) {
-			t.Errorf("inline(%q) = %q still contains a mention", s, got)
+	})
+}
+
+// The text must not be able to end the code span or block it is rendered in.
+
+func FuzzCodeSpan(f *testing.F) {
+	for _, s := range []string{"a|b\r\nc", "`", "``x``", " ` ", "a\\|b"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		got := codeSpan(s)
+		if got == "" {
+			return
+		}
+		if strings.ContainsAny(got, "\r\n") {
+			t.Errorf("codeSpan(%q) = %q contains a line break", s, got)
+		}
+		delim := strings.Repeat("`", longestRun(got, '`'))
+		inner := strings.TrimSuffix(strings.TrimPrefix(got, delim), delim)
+		if longestRun(inner, '`') >= len(delim) {
+			t.Errorf("codeSpan(%q) = %q: content can close the span", s, got)
+		}
+		if strings.Contains(strings.ReplaceAll(inner, "\\|", ""), "|") {
+			t.Errorf("codeSpan(%q) = %q contains an unescaped |", s, got)
+		}
+	})
+}
+
+func FuzzCodeBlock(f *testing.F) {
+	for _, s := range []string{"x", "```", "a\n````\nb", "~~~"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		got := codeBlock(s)
+		first, rest, _ := strings.Cut(got, "\n")
+		inner, _ := strings.CutSuffix(rest, "\n"+first)
+		if strings.Trim(first, "`") != "" || len(first) < 3 || !strings.HasSuffix(got, "\n"+first) {
+			t.Fatalf("codeBlock(%q) = %q is not fenced", s, got)
+		}
+		if longestRun(inner, '`') >= len(first) {
+			t.Errorf("codeBlock(%q) = %q: content can close the fence", s, got)
 		}
 	})
 }
@@ -229,12 +295,12 @@ func TestOptionalSectionsOmitted(t *testing.T) {
 	}
 	wantVuln := "## :shield: New Vulnerability Identified\n\n" +
 		"| Field | Value |\n|---|---|\n" +
-		"| **CVE / ID** | CVE-1 |\n" +
-		"| **Source** | NVD |\n" +
-		"| **Severity** | LOW |\n" +
-		"| **CVSS Score** | N/A |\n" +
-		"| **Project** | p |\n" +
-		"| **Component** | c |\n" + footer(vuln)
+		"| **CVE / ID** | `CVE-1` |\n" +
+		"| **Source** | `NVD` |\n" +
+		"| **Severity** | `LOW` |\n" +
+		"| **CVSS Score** | `N/A` |\n" +
+		"| **Project** | `p` |\n" +
+		"| **Component** | `c` |\n" + footer(vuln)
 	if vuln.Body != wantVuln {
 		t.Errorf("new vulnerability body =\n%q\nwant\n%q", vuln.Body, wantVuln)
 	}
@@ -248,8 +314,8 @@ func TestOptionalSectionsOmitted(t *testing.T) {
 	}
 	wantDep := "## :warning: Vulnerable Dependency Introduced\n\n" +
 		"| Field | Value |\n|---|---|\n" +
-		"| **Project** | p |\n" +
-		"| **Component** | c |\n\n" +
+		"| **Project** | `p` |\n" +
+		"| **Component** | `c` |\n\n" +
 		"**Vulnerabilities:**\n" + footer(dep)
 	if dep.Body != wantDep {
 		t.Errorf("new vulnerable dependency body =\n%q\nwant\n%q", dep.Body, wantDep)

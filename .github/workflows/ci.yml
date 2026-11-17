@@ -45,7 +45,8 @@ jobs:
         uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
 
       - name: Install devenv
-        run: nix profile add nixpkgs#devenv
+        # Pinned to the nixpkgs revision locked in devenv.lock
+        run: nix profile add "github:NixOS/nixpkgs/$(jq -r '.nodes."nixpkgs-src".locked.rev' devenv.lock)#devenv"
 
       - name: Build devenv shell
         run: devenv test
@@ -86,7 +87,8 @@ jobs:
         uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
 
       - name: Install devenv
-        run: nix profile add nixpkgs#devenv
+        # Pinned to the nixpkgs revision locked in devenv.lock
+        run: nix profile add "github:NixOS/nixpkgs/$(jq -r '.nodes."nixpkgs-src".locked.rev' devenv.lock)#devenv"
 
       - name: Build devenv shell
         run: devenv test
@@ -95,8 +97,18 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            # The version ends up in shell commands, and git allows characters
+            # such as $, ; and ` in tag names.
+            if [[ ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::Tag ${GITHUB_REF_NAME} is not a semantic version (vX.Y.Z[-prerelease])"
+              exit 1
+            fi
             VERSION="${GITHUB_REF_NAME#v}"
-            TAGS="${VERSION},latest"
+            TAGS="${VERSION}"
+            # Pre-releases (vX.Y.Z-rc.1) do not move latest
+            if [[ "${VERSION}" != *-* ]]; then
+              TAGS="${TAGS},latest"
+            fi
           else
             VERSION="sha-${GITHUB_SHA::7}"
             TAGS="${VERSION},main"

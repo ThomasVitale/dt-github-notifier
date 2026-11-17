@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/thomasvitale/dt-github-notifier/internal/issue"
@@ -23,12 +24,26 @@ const (
 	maxErrorBodyBytes = 64 << 10
 	// maxResponseBodyBytes bounds how much of a successful response is read.
 	maxResponseBodyBytes = 1 << 20
+
+	// visibilityTTL is how long a repository's visibility is cached;
+	// visibilityMax bounds the number of cached repositories.
+	visibilityTTL = time.Hour
+	visibilityMax = 10_000
 )
 
 type Client struct {
 	baseURL    string
 	token      string
 	httpClient *http.Client
+
+	mu         sync.Mutex
+	visibility map[string]cachedVisibility
+	now        func() time.Time
+}
+
+type cachedVisibility struct {
+	public  bool
+	expires time.Time
 }
 
 // issueRequest is the body of the "create an issue" endpoint.
@@ -47,7 +62,44 @@ func New(baseURL, token string) *Client {
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
 		},
+		visibility: make(map[string]cachedVisibility),
+		now:        time.Now,
 	}
+}
+
+// IsPublic reports whether the given "owner/repo" is public. The result is
+// cached for visibilityTTL.
+func (c *Client) IsPublic(ctx context.Context, repo string) (bool, error) {
+	if !IsValidRepo(repo) {
+		return false, fmt.Errorf("invalid GitHub repo %q", repo)
+	}
+	key := strings.ToLower(repo)
+
+	c.mu.Lock()
+	cached, ok := c.visibility[key]
+	c.mu.Unlock()
+	if ok && c.now().Before(cached.expires) {
+		return cached.public, nil
+	}
+
+	var result struct {
+		Private    bool   `json:"private"`
+		Visibility string `json:"visibility"`
+	}
+	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/repos/%s", c.baseURL, repo), nil, http.StatusOK, &result); err != nil {
+		return false, err
+	}
+	// "internal" repositories (GitHub Enterprise) are visible to the whole
+	// enterprise, not the public.
+	public := !result.Private && result.Visibility != "internal"
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.visibility) >= visibilityMax {
+		clear(c.visibility)
+	}
+	c.visibility[key] = cachedVisibility{public: public, expires: c.now().Add(visibilityTTL)}
+	return public, nil
 }
 
 // CreateIssue creates an issue in the given "owner/repo" and returns its URL.

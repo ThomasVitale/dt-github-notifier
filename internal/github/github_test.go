@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -232,5 +233,88 @@ func TestFindOpenIssue(t *testing.T) {
 				t.Errorf("request path = %q, q = %q, want /search/issues, %q", gotPath, gotQuery, wantQuery)
 			}
 		})
+	}
+}
+
+func TestAllowlist(t *testing.T) {
+	t.Parallel()
+	a, err := NewAllowlist([]string{"myorg/*", " Other/Repo ", ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := map[string]bool{
+		"myorg/anything":  true,
+		"MyOrg/Anything":  true,
+		"other/repo":      true,
+		"other/repo2":     false,
+		"myorgx/repo":     false,
+		"attacker/myorg":  false,
+		"myorg/sub/thing": false,
+	}
+	for repo, want := range tests {
+		if got := a.Allows(repo); got != want {
+			t.Errorf("Allows(%q) = %v, want %v", repo, got, want)
+		}
+	}
+
+	all, err := NewAllowlist([]string{"*/*"})
+	if err != nil || !all.Allows("anyone/anything") {
+		t.Errorf(`"*/*" does not allow every repo: %v`, err)
+	}
+
+	for _, bad := range [][]string{nil, {""}, {"myorg"}, {"*"}, {"a/b/c"}, {"/repo"}, {"myorg/["}} {
+		if _, err := NewAllowlist(bad); err == nil {
+			t.Errorf("NewAllowlist(%q) succeeded, want an error", bad)
+		}
+	}
+}
+
+func TestIsPublic(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		response string
+		want     bool
+	}{
+		{`{"private":false,"visibility":"public"}`, true},
+		{`{"private":true,"visibility":"private"}`, false},
+		{`{"private":false,"visibility":"internal"}`, false}, // GitHub Enterprise
+	}
+	for _, tc := range tests {
+		var calls int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			if !strings.EqualFold(r.URL.Path, "/repos/myorg/myrepo") {
+				t.Errorf("request path = %q", r.URL.Path)
+			}
+			_, _ = w.Write([]byte(tc.response))
+		}))
+
+		c := New(srv.URL, "test-token")
+		for range 2 {
+			got, err := c.IsPublic(t.Context(), "MyOrg/MyRepo")
+			if err != nil || got != tc.want {
+				t.Errorf("IsPublic() for %s = %v, %v, want %v", tc.response, got, err, tc.want)
+			}
+		}
+		srv.Close()
+		if calls != 1 {
+			t.Errorf("GitHub called %d times, want 1 (cached)", calls)
+		}
+	}
+}
+
+func TestIsPublicErrors(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "test-token")
+	if _, err := c.IsPublic(t.Context(), "myorg/myrepo"); err == nil {
+		t.Error("IsPublic() of an inaccessible repo succeeded, want an error")
+	}
+	if _, err := c.IsPublic(t.Context(), "../evil"); err == nil {
+		t.Error("IsPublic() of an invalid repo succeeded, want an error")
 	}
 }

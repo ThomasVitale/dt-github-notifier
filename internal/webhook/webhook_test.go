@@ -41,6 +41,8 @@ func (f *fakeResolver) Resolve(ctx context.Context, projectUUID uuid.UUID) (stri
 }
 
 type fakeIssueTracker struct {
+	public      bool // returned by IsPublic
+	publicErr   error
 	existingURL string // returned by FindOpenIssue
 	findErr     error
 	createErr   error
@@ -49,6 +51,10 @@ type fakeIssueTracker struct {
 	creates int
 	repo    string
 	issue   issue.Issue
+}
+
+func (f *fakeIssueTracker) IsPublic(context.Context, string) (bool, error) {
+	return f.public, f.publicErr
 }
 
 func (f *fakeIssueTracker) FindOpenIssue(_ context.Context, repo, key string) (string, error) {
@@ -104,7 +110,7 @@ func TestCreatesIssueInResolvedRepo(t *testing.T) {
 			t.Parallel()
 			repos := &fakeResolver{repo: "myorg/my-service"}
 			issues := &fakeIssueTracker{}
-			rec := serve(t, New(issues, repos, ""), http.MethodPost, notificationtest.Payload(t, tc.payload), "")
+			rec := serve(t, New(issues, repos, Options{}), http.MethodPost, notificationtest.Payload(t, tc.payload), "")
 
 			if rec.Code != http.StatusNoContent {
 				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusNoContent, rec.Body)
@@ -140,6 +146,9 @@ func TestResponses(t *testing.T) {
 		signature      string // X-Webhook-Signature header, if any
 		secret         string
 		resolveErr     error
+		public         bool
+		allowPublic    bool
+		publicErr      error
 		findErr        error
 		existingURL    string
 		createErr      error
@@ -242,6 +251,26 @@ func TestResponses(t *testing.T) {
 			wantCreate:     true,
 		},
 		{
+			name:       "public repo is refused",
+			body:       vuln,
+			public:     true,
+			wantStatus: http.StatusUnprocessableEntity,
+		},
+		{
+			name:        "public repo is allowed when configured",
+			body:        vuln,
+			public:      true,
+			allowPublic: true,
+			wantStatus:  http.StatusNoContent,
+			wantCreate:  true,
+		},
+		{
+			name:       "transient visibility check failure asks DT to retry",
+			body:       vuln,
+			publicErr:  retryable.Wrap(errors.New("unavailable"), 0),
+			wantStatus: http.StatusServiceUnavailable,
+		},
+		{
 			name:        "existing open issue is not duplicated",
 			body:        vuln,
 			existingURL: "https://github.com/myorg/my-service/issues/7",
@@ -270,10 +299,14 @@ func TestResponses(t *testing.T) {
 			if tc.method == "" {
 				tc.method = http.MethodPost
 			}
-			issues := &fakeIssueTracker{existingURL: tc.existingURL, findErr: tc.findErr, createErr: tc.createErr}
+			issues := &fakeIssueTracker{
+				public: tc.public, publicErr: tc.publicErr,
+				existingURL: tc.existingURL, findErr: tc.findErr, createErr: tc.createErr,
+			}
 			repos := &fakeResolver{repo: "myorg/my-service", err: tc.resolveErr}
 
-			rec := serve(t, New(issues, repos, tc.secret), tc.method, tc.body, tc.signature)
+			h := New(issues, repos, Options{Secret: tc.secret, AllowPublicRepos: tc.allowPublic})
+			rec := serve(t, h, tc.method, tc.body, tc.signature)
 
 			if rec.Code != tc.wantStatus {
 				t.Errorf("status = %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body)
@@ -291,7 +324,7 @@ func TestResponses(t *testing.T) {
 func TestRepeatedNotificationUsesRecentIssue(t *testing.T) {
 	t.Parallel()
 	issues := &fakeIssueTracker{}
-	h := New(issues, &fakeResolver{repo: "myorg/my-service"}, "")
+	h := New(issues, &fakeResolver{repo: "myorg/my-service"}, Options{})
 	body := notificationtest.Payload(t, notificationtest.NewVulnerability)
 
 	for range 3 {

@@ -1,4 +1,4 @@
-# dt-github-notifier
+# DependencyTrack GitHub Notifier
 
 A lightweight Go service that receives [Dependency-Track](https://dependencytrack.org/) v5 webhook
 notifications and creates GitHub Issues for policy violations and vulnerabilities.
@@ -45,7 +45,7 @@ Dependency-Track v4 payloads are not supported.
 ### Repository resolution
 
 Each issue is created in the GitHub repository of the affected project, resolved through the
-Dependency-Track REST API in this order:
+Dependency-Track REST API in this order (limited to the sources in `REPO_SOURCES`):
 
 1. An external reference of type `vcs` pointing to `https://github.com/<owner>/<repo>`
 2. A project property with group `github`, name `repo` and value `<owner>/<repo>`
@@ -54,6 +54,7 @@ Dependency-Track REST API in this order:
    hierarchy can share one repository
 5. The `GITHUB_REPO` fallback, if set
 
+Repositories not matched by `GITHUB_ALLOWED_REPOS` are skipped, and the next hint is tried.
 Resolved repositories are cached for 5 minutes per project, so a BOM upload that triggers many
 notifications for one project costs a single lookup.
 
@@ -89,7 +90,7 @@ Dependency-Track retries a webhook that answers with 429, 502, 503 or 504, honor
 | 400 | Malformed payload |
 | 401 | Missing or invalid signature (when `DT_WEBHOOK_SECRET` is set) |
 | 413 | Payload larger than 10 MiB |
-| 422 | No GitHub repository could be resolved and `GITHUB_REPO` is not set |
+| 422 | No allowed GitHub repository could be resolved and `GITHUB_REPO` is not set, or the repository is public and `ALLOW_PUBLIC_REPOS` is not set |
 | 500 | Permanent failure, e.g. GitHub rejected the issue (unknown repo, invalid token) |
 | 503 | Transient failure: Dependency-Track API or GitHub unavailable, GitHub rate limits (with `Retry-After` when known) |
 
@@ -118,12 +119,16 @@ All tasks are defined in `Taskfile.yml` and run with [Task](https://taskfile.dev
 
 | Env var | Required | Description |
 |---|---|---|
-| `GITHUB_TOKEN` | Yes | GitHub PAT with Issues: Read & Write |
-| `GITHUB_REPO` | No | Fallback repo for projects without a GitHub hint, e.g. `myorg/myrepo` |
-| `GITHUB_API_URL` | No | GitHub REST API base URL (default: `https://api.github.com`) |
+| `GITHUB_TOKEN` | Yes | GitHub token (see [permissions](#github-token-permissions)) |
+| `GITHUB_ALLOWED_REPOS` | Yes | Repositories issues may be created in, comma-separated; `*` matches any owner or repository name, e.g. `myorg/*` or `myorg/app,myorg/lib` |
+| `GITHUB_REPO` | No | Fallback repo for projects without a GitHub hint, e.g. `myorg/myrepo`; must be allowed |
+| `GITHUB_API_URL` | No | GitHub REST API base URL, HTTPS only (default: `https://api.github.com`) |
+| `REPO_SOURCES` | No | Project data trusted to designate a repository, comma-separated among `vcs`, `property` and `purl` (default: all) |
+| `ALLOW_PUBLIC_REPOS` | No | Set to `true` to allow issues in public repositories (default: `false`) |
 | `DT_BASE_URL` | Yes | Dependency-Track API server URL |
 | `DT_API_KEY` | Yes | Dependency-Track API key (see [permissions](#dependency-track-api-key-permissions)) |
-| `DT_WEBHOOK_SECRET` | No (recommended) | Signing secret of the Dependency-Track webhook alert, used to verify `X-Webhook-Signature` |
+| `DT_WEBHOOK_SECRET` | Yes | Signing secret of the Dependency-Track webhook alert, used to verify `X-Webhook-Signature` |
+| `ALLOW_UNSIGNED_WEBHOOKS` | No | Set to `true` to run without `DT_WEBHOOK_SECRET`, e.g. with Dependency-Track < 5.2 (default: `false`) |
 | `PORT` | No | Listen port (default: 8080) |
 | `LOG_LEVEL` | No | `debug`, `info`, `warn` or `error` (default: `info`); logs are JSON on stderr |
 
@@ -165,11 +170,16 @@ git tag v1.0.0 && git push origin v1.0.0
 ### 1. Create the secret
 
 ```bash
-GITHUB_TOKEN=ghp_yourTokenHere DT_API_KEY=xxx DT_WEBHOOK_SECRET=xxx task secret
+task secret
 ```
 
-`DT_WEBHOOK_SECRET` is optional, but without it anyone able to reach the service inside the
-cluster can make it open issues.
+It prompts for the GitHub token, the Dependency-Track API key and the webhook signing secret
+(generate one with `openssl rand -hex 32` and configure the same value in Dependency-Track), unless
+they are set as `GITHUB_TOKEN`, `DT_API_KEY` and `DT_WEBHOOK_SECRET`. The values never appear in
+shell history or process arguments.
+
+Then set `GITHUB_ALLOWED_REPOS` in `deploy/knative.yaml` (or the release's `knative.yaml`) to the
+repositories issues may be created in.
 
 ### 2. Deploy a release
 
@@ -248,8 +258,14 @@ this small binary). Change min-scale to 1 in deploy/knative.yaml to keep a pod a
 
 ## GitHub token permissions
 
-Fine-grained PAT with Repository access (the target repositories) and Issues: Read & Write.
-Issues are searched (for deduplication) and created with this token.
+Fine-grained PAT with Repository access limited to the target repositories, and Issues: Read &
+Write (Metadata: Read is included automatically). The token is used to check repository
+visibility, search for existing issues (for deduplication) and create issues. Its repository
+access is the ultimate bound on where issues can be created, so keep it as narrow as
+`GITHUB_ALLOWED_REPOS`.
+
+Issues are authored by the token's owner. A dedicated machine account (or, in the future, a
+GitHub App) avoids attributing them to a person.
 
 ---
 
@@ -262,6 +278,33 @@ Create these labels in your repo before first use:
   violation-state:fail, violation-state:warn, violation-state:info
 
 ---
+
+## Security
+
+The service handles untrusted input: notifications, and Dependency-Track project and vulnerability
+data that anyone able to upload a BOM can influence. It is designed to fail closed:
+
+- **Authentication**: notifications must carry a valid HMAC signature (`DT_WEBHOOK_SECRET`),
+  verified in constant time before parsing. Bodies are limited to 1 MiB and pods to 10
+  concurrent requests, bounding memory use.
+- **Routing**: BOM uploads set a project's `vcs` reference and PURL, so issues are only created in
+  repositories matched by `GITHUB_ALLOWED_REPOS`. To trust only portfolio managers, set
+  `REPO_SOURCES=property`.
+- **Disclosure**: issues expose unfixed vulnerabilities and internal project inventory, so public
+  repositories are refused unless `ALLOW_PUBLIC_REPOS=true`. Consider GitHub's private
+  vulnerability reporting for public projects instead.
+- **Content**: values from Dependency-Track are rendered as inline code or fenced code blocks, so
+  they cannot add links, images, HTML, @-mentions or #references, and titles are neutralized.
+- **Transport**: the GitHub API is HTTPS only. The default `DT_BASE_URL` is plain HTTP inside the
+  cluster, which exposes the Dependency-Track API key to anyone able to observe pod traffic; prefer
+  HTTPS or a service mesh with mTLS.
+- **Network**: `deploy/networkpolicy.yaml` is a starting point for restricting egress to DNS,
+  Dependency-Track and GitHub. Test it in your cluster before applying it.
+- **Kubernetes**: the container runs as non-root with a read-only root filesystem and no
+  capabilities. The service needs no Kubernetes API access; if your Knative version accepts
+  `automountServiceAccountToken: false` in the revision spec, set it.
+- **Logs**: secrets are never logged. Logs contain notification titles, repositories, issue URLs
+  and the source address of rejected requests.
 
 ## Project structure
 

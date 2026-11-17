@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -50,8 +52,10 @@ func (f *fakeProjectFetcher) getProperties(_ context.Context, _ uuid.UUID) ([]dt
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func newTestResolver(fetcher projectFetcher, defaultRepo string) *Resolver {
-	return newResolver(fetcher, defaultRepo)
+	return newResolver(fetcher, Options{DefaultRepo: defaultRepo, Allowed: allowAll})
 }
+
+func allowAll(string) bool { return true }
 
 // ── repoFromURL ───────────────────────────────────────────────────────────────
 
@@ -416,6 +420,74 @@ func TestResolve(t *testing.T) {
 	}
 }
 
+// ── allowlist and sources ─────────────────────────────────────────────────────
+
+func TestResolveSkipsReposThatAreNotAllowed(t *testing.T) {
+	t.Parallel()
+	projectID := uuid.MustParse("aaaaaaaa-0000-0000-0000-000000000001")
+	fetcher := &fakeProjectFetcher{
+		project: dtrack.Project{
+			Name: "my-service",
+			// Set by a BOM upload, pointing at a repo outside the organization.
+			ExternalReferences: []dtrack.ExternalReference{{Type: "vcs", URL: "https://github.com/attacker/repo"}},
+			PURL:               "pkg:github/myorg/my-service@1.0.0",
+		},
+	}
+	allowed := func(repo string) bool { return strings.HasPrefix(repo, "myorg/") }
+
+	r := newResolver(fetcher, Options{Allowed: allowed})
+	if repo, err := r.Resolve(t.Context(), projectID); err != nil || repo != "myorg/my-service" {
+		t.Errorf("Resolve() = %q, %v, want the allowed repo from the PURL", repo, err)
+	}
+
+	fetcher.project.PURL = ""
+	r = newResolver(fetcher, Options{Allowed: allowed})
+	if _, err := r.Resolve(t.Context(), projectID); !errors.Is(err, ErrNoRepo) {
+		t.Errorf("Resolve() error = %v, want ErrNoRepo when only a disallowed repo is designated", err)
+	}
+}
+
+func TestResolveUsesOnlyConfiguredSources(t *testing.T) {
+	t.Parallel()
+	projectID := uuid.MustParse("aaaaaaaa-0000-0000-0000-000000000001")
+	fetcher := &fakeProjectFetcher{
+		project: dtrack.Project{
+			Name:               "my-service",
+			ExternalReferences: []dtrack.ExternalReference{{Type: "vcs", URL: "https://github.com/myorg/from-vcs"}},
+			PURL:               "pkg:github/myorg/from-purl@1.0.0",
+		},
+		properties: []dtrack.ProjectProperty{{Group: "github", Name: "repo", Value: "myorg/from-property"}},
+	}
+
+	tests := []struct {
+		sources []Source
+		want    string
+	}{
+		{[]Source{SourceProperty}, "myorg/from-property"},
+		{[]Source{SourcePURL, SourceVCS}, "myorg/from-purl"},
+		{nil, "myorg/from-vcs"}, // all sources, in the default order
+	}
+	for _, tc := range tests {
+		r := newResolver(fetcher, Options{Sources: tc.sources, Allowed: allowAll})
+		if repo, err := r.Resolve(t.Context(), projectID); err != nil || repo != tc.want {
+			t.Errorf("Resolve() with sources %v = %q, %v, want %q", tc.sources, repo, err, tc.want)
+		}
+	}
+}
+
+func TestParseSources(t *testing.T) {
+	t.Parallel()
+	got, err := ParseSources(" Property , vcs,property")
+	if err != nil || !slices.Equal(got, []Source{SourceProperty, SourceVCS}) {
+		t.Errorf("ParseSources() = %v, %v", got, err)
+	}
+	for _, bad := range []string{"", " , ", "vcs,git"} {
+		if _, err := ParseSources(bad); err == nil {
+			t.Errorf("ParseSources(%q) succeeded, want an error", bad)
+		}
+	}
+}
+
 // ── parent projects ───────────────────────────────────────────────────────────
 
 func TestResolveFromParentProjects(t *testing.T) {
@@ -558,7 +630,7 @@ func TestDTClientAdapterIsCreatedLazily(t *testing.T) {
 	r := New(func() (*dtrack.Client, error) {
 		created.Add(1)
 		return dtrack.NewClient(srv.URL, dtrack.WithAPIKey("test-key"))
-	}, "")
+	}, Options{Allowed: allowAll})
 
 	// DT unavailable: the failure is retryable and nothing is cached.
 	_, err := r.Resolve(t.Context(), projectID)

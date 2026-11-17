@@ -27,10 +27,10 @@ import (
 )
 
 const (
-	// maxRequestBodyBytes bounds the notification size. Groups that are not
-	// handled (e.g. scheduled summaries) can be large but must still be read
-	// in full to verify their signature.
-	maxRequestBodyBytes = 10 << 20
+	// maxRequestBodyBytes bounds the notification size, and with it the memory
+	// a request can use before its signature is verified. Event notifications
+	// are a few KiB; the large scheduled summaries come from separate alerts.
+	maxRequestBodyBytes = 1 << 20
 
 	// RequestTimeout bounds the processing of a notification. It must stay
 	// below the 10 s Dependency-Track waits for a webhook response, otherwise
@@ -45,11 +45,18 @@ const (
 	recentIssuesMax = 10_000
 )
 
-// errUnhandledGroup is returned for notification groups that create no issue.
-var errUnhandledGroup = errors.New("unhandled notification group")
+var (
+	// errUnhandledGroup is returned for notification groups that create no issue.
+	errUnhandledGroup = errors.New("unhandled notification group")
+	// errPublicRepo is returned when the resolved repo is public and public
+	// repos are not allowed.
+	errPublicRepo = errors.New("refusing to disclose vulnerability details in a public repository")
+)
 
 // IssueTracker finds and creates GitHub issues.
 type IssueTracker interface {
+	// IsPublic reports whether the repo is publicly visible.
+	IsPublic(ctx context.Context, repo string) (bool, error)
 	// FindOpenIssue returns the URL of an open issue whose body contains key,
 	// or "" when there is none.
 	FindOpenIssue(ctx context.Context, repo, key string) (string, error)
@@ -68,28 +75,39 @@ type RepoResolver interface {
 // Response codes follow the retry semantics of the DT webhook publisher, which
 // retries 429, 502, 503 and 504 and gives up on any other non-2xx status:
 //   - 204 when the issue was created or already exists, or the group is not handled
-//   - 400 / 401 / 413 / 422 for requests that will never succeed
+//   - 400 / 401 / 413 / 422 for requests that will never succeed (422 when no
+//     repo can be resolved or it is public and public repos are not allowed)
 //   - 500 for permanent failures (e.g. GitHub rejected the issue)
 //   - 503 for transient failures (DT API or GitHub unavailable, rate limits)
 type Handler struct {
-	issues  IssueTracker
-	repos   RepoResolver
-	secret  []byte // empty when signature verification is disabled
-	timeout time.Duration
+	issues      IssueTracker
+	repos       RepoResolver
+	secret      []byte // empty when signature verification is disabled
+	allowPublic bool
+	timeout     time.Duration
 
 	recent   *recentIssues
 	inflight singleflight.Group // collapses concurrent notifications for the same issue
 }
 
-// New returns a Handler. When secret is not empty, requests must carry a valid
-// X-Webhook-Signature computed with it.
-func New(issues IssueTracker, repos RepoResolver, secret string) *Handler {
+// Options configures a Handler.
+type Options struct {
+	// Secret is the signing secret of the Dependency-Track webhook alert. When
+	// set, requests must carry a valid X-Webhook-Signature computed with it.
+	Secret string
+	// AllowPublicRepos permits creating issues in public repositories.
+	AllowPublicRepos bool
+}
+
+// New returns a Handler.
+func New(issues IssueTracker, repos RepoResolver, opts Options) *Handler {
 	return &Handler{
-		issues:  issues,
-		repos:   repos,
-		secret:  []byte(secret),
-		timeout: RequestTimeout,
-		recent:  newRecentIssues(recentIssuesTTL, recentIssuesMax),
+		issues:      issues,
+		repos:       repos,
+		secret:      []byte(opts.Secret),
+		allowPublic: opts.AllowPublicRepos,
+		timeout:     RequestTimeout,
+		recent:      newRecentIssues(recentIssuesTTL, recentIssuesMax),
 	}
 }
 
@@ -168,6 +186,15 @@ func (h *Handler) ensureIssue(ctx context.Context, repo string, i issue.Issue) (
 	v, err, _ := h.inflight.Do(key, func() (any, error) {
 		if url, ok := h.recent.get(key); ok {
 			return result{url: url}, nil
+		}
+		if !h.allowPublic {
+			public, err := h.issues.IsPublic(ctx, repo)
+			if err != nil {
+				return nil, fmt.Errorf("check repository visibility: %w", err)
+			}
+			if public {
+				return nil, errPublicRepo
+			}
 		}
 		url, err := h.issues.FindOpenIssue(ctx, repo, i.Key)
 		if err != nil {
@@ -250,6 +277,9 @@ func writeError(w http.ResponseWriter, log *slog.Logger, err error) {
 	case errors.Is(err, resolver.ErrNoRepo):
 		log.Error("cannot route notification to a GitHub repo", "err", err)
 		http.Error(w, "no GitHub repo for project", http.StatusUnprocessableEntity)
+	case errors.Is(err, errPublicRepo):
+		log.Error("not creating issue: the repository is public (set ALLOW_PUBLIC_REPOS=true to allow it)", "err", err)
+		http.Error(w, "repository is public", http.StatusUnprocessableEntity)
 	default:
 		log.Error("failed to create GitHub issue", "err", err)
 		http.Error(w, "failed to create issue", http.StatusInternalServerError)

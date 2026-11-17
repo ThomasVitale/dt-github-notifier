@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -49,13 +50,21 @@ func run() error {
 	}
 
 	if cfg.WebhookSecret == "" {
-		slog.Warn("DT_WEBHOOK_SECRET is not set: webhook signatures are not verified")
+		slog.Warn("DT_WEBHOOK_SECRET is not set and ALLOW_UNSIGNED_WEBHOOKS=true: " +
+			"anyone able to reach the service can make it create issues")
+	}
+	if cfg.AllowPublicRepos {
+		slog.Warn("ALLOW_PUBLIC_REPOS=true: unfixed vulnerabilities can be disclosed in public repositories")
+	}
+	if strings.HasPrefix(cfg.DTBaseURL, "http://") {
+		slog.Warn("DT_BASE_URL uses plain HTTP: the Dependency-Track API key is sent unencrypted")
 	}
 	slog.Info("starting dt-github-notifier",
 		"port", cfg.Port,
-		"dtBaseURL", cfg.DTBaseURL,
+		"dtBaseURL", cfg.RedactedDTBaseURL(),
 		"gitHubAPIURL", cfg.GitHubAPIURL,
 		"defaultRepo", cfg.GitHubRepo,
+		"repoSources", cfg.RepoSources,
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -94,11 +103,18 @@ func newHandler(cfg config.Config) http.Handler {
 		)
 	}
 
-	repos := resolver.New(newDTClient, cfg.GitHubRepo)
+	repos := resolver.New(newDTClient, resolver.Options{
+		DefaultRepo: cfg.GitHubRepo,
+		Sources:     cfg.RepoSources,
+		Allowed:     cfg.AllowedRepos.Allows,
+	})
 	issues := github.New(cfg.GitHubAPIURL, cfg.GitHubToken)
 
 	mux := http.NewServeMux()
-	mux.Handle("/webhook", webhook.New(issues, repos, cfg.WebhookSecret))
+	mux.Handle("/webhook", webhook.New(issues, repos, webhook.Options{
+		Secret:           cfg.WebhookSecret,
+		AllowPublicRepos: cfg.AllowPublicRepos,
+	}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})

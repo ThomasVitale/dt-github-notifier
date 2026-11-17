@@ -6,10 +6,10 @@ Labels: security, vulnerable-dependency, dependency-track
 
 | Field | Value |
 |---|---|
-| **Project** | projectName projectVersion |
-| **Component** | componentName componentVersion |
+| **Project** | `projectName projectVersion` |
+| **Component** | `componentName componentVersion` |
 
 **Vulnerabilities:**
-- **INT-001** (MEDIUM) — INTERNAL
+- **`INT-001`** (`MEDIUM`) — `INTERNAL`
 
 > This issue was created automatically by dt-github-notifier (deduplication key: `dtgn-d36f91d599ca86612a134da10fba560c`).

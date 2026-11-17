@@ -12,7 +12,8 @@
 #     --namespace dependency-track
 # The DT API key needs the read-only VIEW_PORTFOLIO and PORTFOLIO_MANAGEMENT_READ
 # permissions (the latter to read the github/repo project property).
-# The webhook secret must match the signing secret of the DT webhook alert.
+# The webhook secret must match the signing secret of the DT webhook alert
+# (Dependency-Track 5.2+); generate one with: openssl rand -hex 32
 # Do NOT commit real tokens to git.
 
 ---
@@ -37,6 +38,9 @@ spec:
         # Use concurrency-based autoscaling; spin up a new pod after 10 in-flight requests.
         autoscaling.knative.dev/target: "10"
     spec:
+      # Hard limit on concurrent requests per pod, bounding memory use (each
+      # request may buffer up to 1 MiB). Knative's default, 0, means no limit.
+      containerConcurrency: 10
       # Maximum duration of a request. Kept above the 8 s the bridge allows itself
       # per notification (Dependency-Track waits 10 s for a webhook response), so
       # Knative never cuts off a request the bridge is still handling.
@@ -61,8 +65,20 @@ spec:
             # Set GITHUB_REPO as a fallback for projects that have none of those.
             - name: GITHUB_REPO
               value: ""                 # optional fallback, e.g. "myorg/myrepo"
+            # REQUIRED: the repositories issues may be created in (comma-separated,
+            # "*" matches any owner or repository name). Project data can be set by
+            # anyone able to upload a BOM, so this bounds where issues can go.
+            - name: GITHUB_ALLOWED_REPOS
+              value: "myorg/*"
+            # Optional: the project data trusted to designate a repository, among
+            # vcs, property and purl (default: all). BOM uploads set vcs and purl;
+            # "property" trusts only users with PORTFOLIO_MANAGEMENT.
+            # - name: REPO_SOURCES
+            #   value: "property"
             - name: DT_BASE_URL
-              # Internal cluster DNS — same namespace as Dependency-Track.
+              # Internal cluster DNS — same namespace as Dependency-Track. Plain HTTP
+              # sends the API key unencrypted inside the cluster: prefer HTTPS or a
+              # service mesh with mTLS.
               value: "http://dependency-track-api-server.dependency-track.svc.cluster.local:8080"
             - name: DT_API_KEY
               valueFrom:
@@ -73,13 +89,15 @@ spec:
             - name: LOG_LEVEL
               value: info
             # Verifies the X-Webhook-Signature header sent by Dependency-Track 5.2+.
-            # Optional (the key may be absent), but strongly recommended.
+            # Required, unless ALLOW_UNSIGNED_WEBHOOKS=true.
             - name: DT_WEBHOOK_SECRET
               valueFrom:
                 secretKeyRef:
                   name: dt-github-notifier-secret
                   key: webhook-secret
-                  optional: true
+            # Keeps the Go heap below the memory limit.
+            - name: GOMEMLIMIT
+              value: "48MiB"
           securityContext:
             runAsNonRoot: true
             allowPrivilegeEscalation: false

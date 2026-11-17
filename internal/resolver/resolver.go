@@ -89,17 +89,19 @@ func (a *dtClientAdapter) getProperties(ctx context.Context, id uuid.UUID) ([]dt
 
 // Resolver resolves a GitHub "org/repo" string from a Dependency-Track project.
 //
-// Resolution is attempted in this order:
+// Resolution is attempted in this order, limited to the configured sources:
 //  1. Project external reference of type "vcs" pointing to github.com
 //  2. Project property  group="github" name="repo"  value="org/repo"
 //  3. Project PURL     pkg:github/org/repo@version
 //  4. The same, recursively, on the parent project
 //  5. Fallback to the statically configured default repo
 //
-// Resolved repos are cached for cacheTTL.
+// Repos that are not allowed are skipped. Resolved repos are cached for cacheTTL.
 type Resolver struct {
 	dt          projectFetcher
 	defaultRepo string // fallback, may be empty
+	sources     []Source
+	allowed     func(repo string) bool
 
 	mu    sync.Mutex
 	cache map[uuid.UUID]cachedRepo
@@ -111,14 +113,37 @@ type cachedRepo struct {
 	expires time.Time
 }
 
-// New returns a Resolver querying the Dependency-Track client returned by
-// newClient, which is called on first use (and again until it succeeds).
-func New(newClient func() (*dtrack.Client, error), defaultRepo string) *Resolver {
-	return newResolver(&dtClientAdapter{newClient: newClient}, defaultRepo)
+// Options configures a Resolver.
+type Options struct {
+	// DefaultRepo is the fallback repo; it may be empty.
+	DefaultRepo string
+	// Sources are the project data consulted, in order; empty means AllSources.
+	Sources []Source
+	// Allowed reports whether a repo may be used. It is required.
+	Allowed func(repo string) bool
 }
 
-func newResolver(dt projectFetcher, defaultRepo string) *Resolver {
-	return &Resolver{dt: dt, defaultRepo: defaultRepo, cache: make(map[uuid.UUID]cachedRepo), now: time.Now}
+// New returns a Resolver querying the Dependency-Track client returned by
+// newClient, which is called on first use (and again until it succeeds).
+func New(newClient func() (*dtrack.Client, error), opts Options) *Resolver {
+	return newResolver(&dtClientAdapter{newClient: newClient}, opts)
+}
+
+func newResolver(dt projectFetcher, opts Options) *Resolver {
+	if opts.Allowed == nil {
+		panic("resolver: Options.Allowed is required")
+	}
+	if len(opts.Sources) == 0 {
+		opts.Sources = AllSources
+	}
+	return &Resolver{
+		dt:          dt,
+		defaultRepo: opts.DefaultRepo,
+		sources:     opts.Sources,
+		allowed:     opts.Allowed,
+		cache:       make(map[uuid.UUID]cachedRepo),
+		now:         time.Now,
+	}
 }
 
 // Resolve returns the GitHub "org/repo" for the given DT project UUID.
@@ -155,51 +180,24 @@ func (r *Resolver) resolve(ctx context.Context, notified, projectUUID uuid.UUID,
 		return "", retryable.Wrap(fmt.Errorf("fetch project %s: %w", projectUUID, err), 0)
 	}
 
-	// 1. External references — look for a vcs ref pointing at github.com
-	for _, ref := range project.ExternalReferences {
-		if strings.EqualFold(ref.Type, "vcs") {
-			if repo, ok := repoFromURL(ref.URL); ok {
-				slog.Debug("resolved repo from external reference",
-					"project", project.Name, "repo", repo)
-				return repo, nil
-			}
+	for _, source := range r.sources {
+		repo, err := r.fromSource(ctx, source, projectUUID, project)
+		if err != nil {
+			return "", err
 		}
+		if repo == "" {
+			continue
+		}
+		if !r.allowed(repo) {
+			slog.Warn("ignoring repo not allowed by GITHUB_ALLOWED_REPOS",
+				"project", project.Name, "source", source, "repo", repo)
+			continue
+		}
+		slog.Debug("resolved repo", "project", project.Name, "source", source, "repo", repo)
+		return repo, nil
 	}
 
-	// 2. Project property: groupName="github", propertyName="repo"
-	props, err := r.dt.getProperties(ctx, projectUUID)
-	switch {
-	case err == nil:
-	case apiStatus(err) == http.StatusUnauthorized || apiStatus(err) == http.StatusForbidden:
-		slog.Warn("cannot read project properties: DT API key lacks PORTFOLIO_MANAGEMENT_READ, skipping",
-			"project", project.Name, "err", err)
-	case apiStatus(err) == http.StatusNotFound:
-	default:
-		return "", retryable.Wrap(fmt.Errorf("fetch properties of project %s: %w", projectUUID, err), 0)
-	}
-	for _, p := range props {
-		if strings.EqualFold(p.Group, "github") && strings.EqualFold(p.Name, "repo") {
-			repo := strings.TrimSpace(p.Value)
-			if github.IsValidRepo(repo) {
-				slog.Debug("resolved repo from project property",
-					"project", project.Name, "repo", repo)
-				return repo, nil
-			}
-			slog.Warn("ignoring invalid github/repo project property",
-				"project", project.Name, "value", repo)
-		}
-	}
-
-	// 3. PURL  pkg:github/org/repo@version  or  pkg:github/org/repo
-	if project.PURL != "" {
-		if repo, ok := repoFromPURL(project.PURL); ok {
-			slog.Debug("resolved repo from project PURL",
-				"project", project.Name, "repo", repo)
-			return repo, nil
-		}
-	}
-
-	// 4. Parent project
+	// No usable hint: try the parent project
 	if parent := project.ParentRef; parent != nil && parent.UUID != uuid.Nil {
 		if depth < maxParentDepth {
 			slog.Debug("no GitHub hint on project, trying its parent",
@@ -213,6 +211,47 @@ func (r *Resolver) resolve(ctx context.Context, notified, projectUUID uuid.UUID,
 	slog.Warn("could not infer GitHub repo from project, falling back to default",
 		"project", project.Name, "projectUUID", notified)
 	return r.fallback(notified)
+}
+
+// fromSource returns the repo the given source designates for the project,
+// or "" when it designates none.
+func (r *Resolver) fromSource(ctx context.Context, source Source, projectUUID uuid.UUID, project dtrack.Project) (string, error) {
+	switch source {
+	case SourceVCS:
+		for _, ref := range project.ExternalReferences {
+			if strings.EqualFold(ref.Type, "vcs") {
+				if repo, ok := repoFromURL(ref.URL); ok {
+					return repo, nil
+				}
+			}
+		}
+	case SourceProperty:
+		props, err := r.dt.getProperties(ctx, projectUUID)
+		switch {
+		case err == nil:
+		case apiStatus(err) == http.StatusUnauthorized || apiStatus(err) == http.StatusForbidden:
+			slog.Warn("cannot read project properties: DT API key lacks PORTFOLIO_MANAGEMENT_READ, skipping",
+				"project", project.Name, "err", err)
+		case apiStatus(err) == http.StatusNotFound:
+		default:
+			return "", retryable.Wrap(fmt.Errorf("fetch properties of project %s: %w", projectUUID, err), 0)
+		}
+		for _, p := range props {
+			if strings.EqualFold(p.Group, "github") && strings.EqualFold(p.Name, "repo") {
+				repo := strings.TrimSpace(p.Value)
+				if github.IsValidRepo(repo) {
+					return repo, nil
+				}
+				slog.Warn("ignoring invalid github/repo project property",
+					"project", project.Name, "value", repo)
+			}
+		}
+	case SourcePURL:
+		if repo, ok := repoFromPURL(project.PURL); ok {
+			return repo, nil
+		}
+	}
+	return "", nil
 }
 
 func (r *Resolver) cached(projectUUID uuid.UUID) (string, bool) {
