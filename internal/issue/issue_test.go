@@ -63,6 +63,52 @@ func TestIssueSanitizesAndTruncates(t *testing.T) {
 	if n := utf8.RuneCountInString(issue.Body); n != maxBodyLength {
 		t.Errorf("body length = %d, want %d", n, maxBodyLength)
 	}
+	if !strings.HasSuffix(issue.Body, "(deduplication key: `"+issue.Key+"`).\n") {
+		t.Errorf("truncated body lost the footer with the key: ...%q", issue.Body[len(issue.Body)-200:])
+	}
+}
+
+func TestKey(t *testing.T) {
+	t.Parallel()
+	vuln := func(project, component, vulnID string) string {
+		i, err := ForNewVulnerability(notification.NewVulnerabilitySubject{
+			Project:       notification.Project{UUID: project},
+			Component:     notification.Component{UUID: component},
+			Vulnerability: notification.Vulnerability{Source: "NVD", VulnID: vulnID, Description: "changes over time"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return i.Key
+	}
+	dep := func(project, component string) string {
+		i, err := ForNewVulnerableDependency(notification.NewVulnerableDependencySubject{
+			Project:   notification.Project{UUID: project},
+			Component: notification.Component{UUID: component},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return i.Key
+	}
+
+	k := vuln("p1", "c1", "CVE-1")
+	if !strings.HasPrefix(k, keyPrefix) || len(k) != len(keyPrefix)+32 {
+		t.Errorf("key %q, want %s followed by 32 hex characters", k, keyPrefix)
+	}
+	if k != vuln("p1", "c1", "CVE-1") {
+		t.Error("the same finding yields different keys")
+	}
+	for name, other := range map[string]string{
+		"other project":       vuln("p2", "c1", "CVE-1"),
+		"other component":     vuln("p1", "c2", "CVE-1"),
+		"other vulnerability": vuln("p1", "c1", "CVE-2"),
+		"other group":         dep("p1", "c1"),
+	} {
+		if other == k {
+			t.Errorf("%s yields the same key", name)
+		}
+	}
 }
 
 func TestCVSSScore(t *testing.T) {
@@ -169,7 +215,9 @@ func FuzzInline(f *testing.F) {
 // optional sections (aliases, description, message, list items) are empty.
 func TestOptionalSectionsOmitted(t *testing.T) {
 	t.Parallel()
-	const footer = "\n> This issue was created automatically by dt-github-notifier.\n"
+	footer := func(i Issue) string {
+		return "\n> This issue was created automatically by dt-github-notifier (deduplication key: `" + i.Key + "`).\n"
+	}
 
 	vuln, err := ForNewVulnerability(notification.NewVulnerabilitySubject{
 		Component:     notification.Component{Name: "c"},
@@ -186,7 +234,7 @@ func TestOptionalSectionsOmitted(t *testing.T) {
 		"| **Severity** | LOW |\n" +
 		"| **CVSS Score** | N/A |\n" +
 		"| **Project** | p |\n" +
-		"| **Component** | c |\n" + footer
+		"| **Component** | c |\n" + footer(vuln)
 	if vuln.Body != wantVuln {
 		t.Errorf("new vulnerability body =\n%q\nwant\n%q", vuln.Body, wantVuln)
 	}
@@ -202,7 +250,7 @@ func TestOptionalSectionsOmitted(t *testing.T) {
 		"| Field | Value |\n|---|---|\n" +
 		"| **Project** | p |\n" +
 		"| **Component** | c |\n\n" +
-		"**Vulnerabilities:**\n" + footer
+		"**Vulnerabilities:**\n" + footer(dep)
 	if dep.Body != wantDep {
 		t.Errorf("new vulnerable dependency body =\n%q\nwant\n%q", dep.Body, wantDep)
 	}
@@ -211,7 +259,7 @@ func TestOptionalSectionsOmitted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(pv.Body, "**Message:**") || !strings.HasSuffix(pv.Body, "| **Timestamp** |  |\n"+footer) {
+	if strings.Contains(pv.Body, "**Message:**") || !strings.HasSuffix(pv.Body, "| **Timestamp** |  |\n"+footer(pv)) {
 		t.Errorf("policy violation body without message =\n%q", pv.Body)
 	}
 }

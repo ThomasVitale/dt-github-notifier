@@ -132,12 +132,12 @@ func TestCreateIssue(t *testing.T) {
 					w.Header().Set(k, v)
 				}
 				w.WriteHeader(tc.status)
-				_ = json.NewEncoder(w).Encode(map[string]string{"message": tc.message})
+				_ = json.NewEncoder(w).Encode(map[string]string{"message": tc.message, "html_url": "https://github.com/myorg/myrepo/issues/1"})
 			}))
 			defer srv.Close()
 
 			c := New(srv.URL+"/", "test-token")
-			err := c.CreateIssue(t.Context(), tc.repo, issue.Issue{Title: "t", Body: "b", Labels: []string{"l"}})
+			url, err := c.CreateIssue(t.Context(), tc.repo, issue.Issue{Title: "t", Body: "b", Labels: []string{"l"}})
 
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("CreateIssue() error = %v, wantErr %v", err, tc.wantErr)
@@ -157,6 +157,79 @@ func TestCreateIssue(t *testing.T) {
 			}
 			if got.body.Title != "t" || got.body.Body != "b" || len(got.body.Labels) != 1 {
 				t.Errorf("request body = %+v", got.body)
+			}
+			if !tc.wantErr && url != "https://github.com/myorg/myrepo/issues/1" {
+				t.Errorf("CreateIssue() URL = %q", url)
+			}
+		})
+	}
+}
+
+func TestFindOpenIssue(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		status    int
+		response  string
+		headers   map[string]string
+		want      string
+		wantErr   bool
+		wantRetry bool
+	}{
+		{
+			name:     "found",
+			status:   http.StatusOK,
+			response: `{"total_count":1,"items":[{"html_url":"https://github.com/myorg/myrepo/issues/7"}]}`,
+			want:     "https://github.com/myorg/myrepo/issues/7",
+		},
+		{
+			name:     "not found",
+			status:   http.StatusOK,
+			response: `{"total_count":0,"items":[]}`,
+		},
+		{
+			name:      "search rate limit is retryable",
+			status:    http.StatusForbidden,
+			response:  `{"message":"API rate limit exceeded"}`,
+			headers:   map[string]string{"X-Ratelimit-Remaining": "0"},
+			wantErr:   true,
+			wantRetry: true,
+		},
+		{
+			name:     "malformed response",
+			status:   http.StatusOK,
+			response: `not json`,
+			wantErr:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var gotPath, gotQuery string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath, gotQuery = r.URL.Path, r.URL.Query().Get("q")
+				for k, v := range tc.headers {
+					w.Header().Set(k, v)
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.response))
+			}))
+			defer srv.Close()
+
+			got, err := New(srv.URL, "test-token").FindOpenIssue(t.Context(), "myorg/myrepo", "dtgn-0123")
+
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("FindOpenIssue() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if _, retry := retryable.As(err); retry != tc.wantRetry {
+				t.Errorf("FindOpenIssue() retryable = %v, want %v", retry, tc.wantRetry)
+			}
+			if got != tc.want {
+				t.Errorf("FindOpenIssue() = %q, want %q", got, tc.want)
+			}
+			if wantQuery := `repo:myorg/myrepo is:issue is:open in:body "dtgn-0123"`; gotPath != "/search/issues" || gotQuery != wantQuery {
+				t.Errorf("request path = %q, q = %q, want /search/issues, %q", gotPath, gotQuery, wantQuery)
 			}
 		})
 	}

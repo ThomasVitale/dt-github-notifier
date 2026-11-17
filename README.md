@@ -50,7 +50,33 @@ Dependency-Track REST API in this order:
 1. An external reference of type `vcs` pointing to `https://github.com/<owner>/<repo>`
 2. A project property with group `github`, name `repo` and value `<owner>/<repo>`
 3. A project PURL of the form `pkg:github/<owner>/<repo>`
-4. The `GITHUB_REPO` fallback, if set
+4. The same hints on the parent project, then its parent (up to 5 levels), so a whole project
+   hierarchy can share one repository
+5. The `GITHUB_REPO` fallback, if set
+
+Resolved repositories are cached for 5 minutes per project, so a BOM upload that triggers many
+notifications for one project costs a single lookup.
+
+### Deduplication
+
+Every issue carries a key that identifies the finding, shown in its footer
+(`deduplication key: dtgn-…`):
+
+| DT Group | Finding |
+|---|---|
+| `NEW_VULNERABILITY` | project + component + vulnerability |
+| `NEW_VULNERABLE_DEPENDENCY` | project + component |
+| `POLICY_VIOLATION` | project + component + policy condition |
+
+Before creating an issue, the service searches the repository for an **open** issue with the same
+key and skips the notification if one exists. Once that issue is closed, a new notification for
+the same finding opens a new issue. Issues handled in the last 15 minutes are also remembered in
+memory, because GitHub search may not return very recent issues yet, which would otherwise let a
+Dependency-Track retry create a duplicate.
+
+The GitHub search API allows 30 requests per minute, and GitHub limits issue creation to about 80
+per minute and 500 per hour. Notifications over these limits are answered with 503 and
+`Retry-After`, so Dependency-Track delivers them later.
 
 ### Responses and retries
 
@@ -59,7 +85,7 @@ Dependency-Track retries a webhook that answers with 429, 502, 503 or 504, honor
 
 | Status | When |
 |---|---|
-| 204 | Issue created, or notification group not handled |
+| 204 | Issue created or already open, or notification group not handled |
 | 400 | Malformed payload |
 | 401 | Missing or invalid signature (when `DT_WEBHOOK_SECRET` is set) |
 | 413 | Payload larger than 10 MiB |
@@ -191,7 +217,8 @@ this small binary). Change min-scale to 1 in deploy/knative.yaml to keep a pod a
 
 ## GitHub token permissions
 
-Fine-grained PAT with Repository access (target repo only) and Issues: Read & Write.
+Fine-grained PAT with Repository access (the target repositories) and Issues: Read & Write.
+Issues are searched (for deduplication) and created with this token.
 
 ---
 

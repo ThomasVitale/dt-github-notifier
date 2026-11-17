@@ -9,5 +9,3 @@
 {{- range .Vulnerabilities }}
 - **{{ cell .VulnID }}** ({{ cell .Severity }}) — {{ cell .Source }}
 {{- end }}
-
-{{ template "footer" }}

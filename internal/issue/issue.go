@@ -7,7 +7,9 @@
 package issue
 
 import (
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strings"
@@ -27,7 +29,13 @@ type Issue struct {
 	Title  string
 	Body   string
 	Labels []string
+	// Key identifies the finding the issue is about, so that repeated
+	// notifications for it can be recognized. It is part of Body.
+	Key string
 }
+
+// keyPrefix starts every Key, making keys easy to search for.
+const keyPrefix = "dtgn-"
 
 //go:embed templates/*.md.tmpl
 var templateFS embed.FS
@@ -43,7 +51,8 @@ var templates = template.Must(template.New("").Funcs(template.FuncMap{
 
 func ForPolicyViolation(s notification.PolicyViolationSubject) (Issue, error) {
 	policy := s.PolicyViolation.Condition.Policy
-	return render("policy_violation.md.tmpl", s,
+	key := newKey("policy-violation", s.Project.UUID, s.Component.UUID, s.PolicyViolation.Condition.UUID)
+	return render("policy_violation.md.tmpl", s, key,
 		fmt.Sprintf("[DT] Policy Violation: %s in %s", policy.Name, projectName(s.Project)),
 		[]string{
 			"security",
@@ -55,7 +64,8 @@ func ForPolicyViolation(s notification.PolicyViolationSubject) (Issue, error) {
 
 func ForNewVulnerability(s notification.NewVulnerabilitySubject) (Issue, error) {
 	v := s.Vulnerability
-	return render("new_vulnerability.md.tmpl", s,
+	key := newKey("new-vulnerability", s.Project.UUID, s.Component.UUID, v.Source, v.VulnID)
+	return render("new_vulnerability.md.tmpl", s, key,
 		fmt.Sprintf("[DT] %s (%s) in %s", v.VulnID, v.Severity, componentName(s.Component)),
 		[]string{
 			"security",
@@ -66,23 +76,35 @@ func ForNewVulnerability(s notification.NewVulnerabilitySubject) (Issue, error) 
 }
 
 func ForNewVulnerableDependency(s notification.NewVulnerableDependencySubject) (Issue, error) {
-	return render("new_vulnerable_dependency.md.tmpl", s,
+	key := newKey("new-vulnerable-dependency", s.Project.UUID, s.Component.UUID)
+	return render("new_vulnerable_dependency.md.tmpl", s, key,
 		fmt.Sprintf("[DT] Vulnerable Dependency: %s introduced in %s", componentName(s.Component), projectName(s.Project)),
 		[]string{"security", "vulnerable-dependency", "dependency-track"})
 }
 
-// render executes the named body template, neutralizes mentions in the title
-// and truncates title and body to the lengths GitHub accepts.
-func render(name string, data any, title string, labels []string) (Issue, error) {
+// render executes the named body template and appends the footer with the
+// key. It neutralizes mentions in the title and truncates title and body to
+// the lengths GitHub accepts, keeping the footer so the key stays searchable.
+func render(name string, data any, key, title string, labels []string) (Issue, error) {
 	var body strings.Builder
 	if err := templates.ExecuteTemplate(&body, name, data); err != nil {
 		return Issue{}, fmt.Errorf("render %s: %w", name, err)
 	}
+	footer := fmt.Sprintf("\n> This issue was created automatically by dt-github-notifier (deduplication key: `%s`).\n", key)
 	return Issue{
 		Title:  truncate(inline(title), maxTitleLength),
-		Body:   truncate(body.String(), maxBodyLength),
+		Body:   truncate(body.String(), maxBodyLength-len([]rune(footer))) + footer,
 		Labels: labels,
+		Key:    key,
 	}, nil
+}
+
+// newKey derives a Key from the notification group and the identifiers of
+// the finding. The identifiers are UUIDs or IDs assigned by Dependency-Track,
+// so the same finding always yields the same key.
+func newKey(group string, ids ...string) string {
+	h := sha256.Sum256([]byte(strings.Join(append([]string{group}, ids...), "\x00")))
+	return keyPrefix + hex.EncodeToString(h[:16])
 }
 
 // componentName returns a human-readable component string, e.g. "apache:axis 1.4"

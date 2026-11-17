@@ -12,4 +12,4 @@ Labels: security, vulnerable-dependency, dependency-track
 **Vulnerabilities:**
 - **INT-001** (MEDIUM) — INTERNAL
 
-> This issue was created automatically by dt-github-notifier.
+> This issue was created automatically by dt-github-notifier (deduplication key: `dtgn-d36f91d599ca86612a134da10fba560c`).

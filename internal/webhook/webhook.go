@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/thomasvitale/dt-github-notifier/internal/issue"
 	"github.com/thomasvitale/dt-github-notifier/internal/notification"
@@ -37,14 +38,23 @@ const (
 	RequestTimeout = 8 * time.Second
 
 	signatureHeader = "X-Webhook-Signature"
+
+	// recentIssuesTTL is how long handled issues are remembered, covering the
+	// lag of GitHub's search index; recentIssuesMax bounds the memory used.
+	recentIssuesTTL = 15 * time.Minute
+	recentIssuesMax = 10_000
 )
 
 // errUnhandledGroup is returned for notification groups that create no issue.
 var errUnhandledGroup = errors.New("unhandled notification group")
 
-// IssueCreator creates GitHub issues.
-type IssueCreator interface {
-	CreateIssue(ctx context.Context, repo string, i issue.Issue) error
+// IssueTracker finds and creates GitHub issues.
+type IssueTracker interface {
+	// FindOpenIssue returns the URL of an open issue whose body contains key,
+	// or "" when there is none.
+	FindOpenIssue(ctx context.Context, repo, key string) (string, error)
+	// CreateIssue creates the issue and returns its URL.
+	CreateIssue(ctx context.Context, repo string, i issue.Issue) (string, error)
 }
 
 // RepoResolver resolves the GitHub "owner/repo" of a Dependency-Track project.
@@ -52,25 +62,35 @@ type RepoResolver interface {
 	Resolve(ctx context.Context, projectUUID uuid.UUID) (string, error)
 }
 
-// Handler creates a GitHub issue for each Dependency-Track notification.
+// Handler creates a GitHub issue for each Dependency-Track notification,
+// unless an open issue already tracks the same finding (see issue.Issue.Key).
 //
 // Response codes follow the retry semantics of the DT webhook publisher, which
 // retries 429, 502, 503 and 504 and gives up on any other non-2xx status:
-//   - 204 when the issue was created or the group is not handled
+//   - 204 when the issue was created or already exists, or the group is not handled
 //   - 400 / 401 / 413 / 422 for requests that will never succeed
 //   - 500 for permanent failures (e.g. GitHub rejected the issue)
 //   - 503 for transient failures (DT API or GitHub unavailable, rate limits)
 type Handler struct {
-	issues  IssueCreator
+	issues  IssueTracker
 	repos   RepoResolver
 	secret  []byte // empty when signature verification is disabled
 	timeout time.Duration
+
+	recent   *recentIssues
+	inflight singleflight.Group // collapses concurrent notifications for the same issue
 }
 
 // New returns a Handler. When secret is not empty, requests must carry a valid
 // X-Webhook-Signature computed with it.
-func New(issues IssueCreator, repos RepoResolver, secret string) *Handler {
-	return &Handler{issues: issues, repos: repos, secret: []byte(secret), timeout: RequestTimeout}
+func New(issues IssueTracker, repos RepoResolver, secret string) *Handler {
+	return &Handler{
+		issues:  issues,
+		repos:   repos,
+		secret:  []byte(secret),
+		timeout: RequestTimeout,
+		recent:  newRecentIssues(recentIssuesTTL, recentIssuesMax),
+	}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -117,16 +137,57 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	var (
+		url     string
+		created bool
+	)
 	if err == nil {
-		err = h.issues.CreateIssue(ctx, repo, i)
+		url, created, err = h.ensureIssue(ctx, repo, i)
 	}
 	if err != nil {
 		writeError(w, log.With("repo", repo, "title", i.Title), err)
 		return
 	}
 
-	log.Info("created GitHub issue", "repo", repo, "title", i.Title)
+	if created {
+		log.Info("created GitHub issue", "repo", repo, "title", i.Title, "url", url)
+	} else {
+		log.Info("GitHub issue already exists, skipping", "repo", repo, "key", i.Key, "url", url)
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ensureIssue creates the issue unless an open issue with the same key exists
+// in the repo, and returns the URL of the created or existing issue.
+func (h *Handler) ensureIssue(ctx context.Context, repo string, i issue.Issue) (string, bool, error) {
+	type result struct {
+		url     string
+		created bool
+	}
+	key := repo + " " + i.Key
+	v, err, _ := h.inflight.Do(key, func() (any, error) {
+		if url, ok := h.recent.get(key); ok {
+			return result{url: url}, nil
+		}
+		url, err := h.issues.FindOpenIssue(ctx, repo, i.Key)
+		if err != nil {
+			return nil, fmt.Errorf("search for existing issue: %w", err)
+		}
+		if url != "" {
+			h.recent.add(key, url)
+			return result{url: url}, nil
+		}
+		if url, err = h.issues.CreateIssue(ctx, repo, i); err != nil {
+			return nil, err
+		}
+		h.recent.add(key, url)
+		return result{url: url, created: true}, nil
+	})
+	if err != nil {
+		return "", false, err
+	}
+	r := v.(result)
+	return r.url, r.created, nil
 }
 
 // buildIssue builds the issue for a notification and resolves the repo of

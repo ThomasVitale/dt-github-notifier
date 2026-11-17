@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	dtrack "github.com/DependencyTrack/client-go"
 	"github.com/google/uuid"
@@ -22,9 +23,23 @@ type fakeProjectFetcher struct {
 	properties []dtrack.ProjectProperty
 	projectErr error
 	propsErr   error
+
+	// projects, when set, serves projects by UUID instead of project
+	// (unknown UUIDs get a 404).
+	projects map[uuid.UUID]dtrack.Project
+
+	projectCalls atomic.Int32
 }
 
-func (f *fakeProjectFetcher) getProject(_ context.Context, _ uuid.UUID) (dtrack.Project, error) {
+func (f *fakeProjectFetcher) getProject(_ context.Context, id uuid.UUID) (dtrack.Project, error) {
+	f.projectCalls.Add(1)
+	if f.projects != nil {
+		p, ok := f.projects[id]
+		if !ok {
+			return dtrack.Project{}, &dtrack.APIError{StatusCode: http.StatusNotFound}
+		}
+		return p, nil
+	}
 	return f.project, f.projectErr
 }
 
@@ -35,7 +50,7 @@ func (f *fakeProjectFetcher) getProperties(_ context.Context, _ uuid.UUID) ([]dt
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func newTestResolver(fetcher projectFetcher, defaultRepo string) *Resolver {
-	return &Resolver{dt: fetcher, defaultRepo: defaultRepo}
+	return newResolver(fetcher, defaultRepo)
 }
 
 // ── repoFromURL ───────────────────────────────────────────────────────────────
@@ -398,6 +413,112 @@ func TestResolve(t *testing.T) {
 				t.Errorf("Resolve() = %q, want %q", got, tc.wantRepo)
 			}
 		})
+	}
+}
+
+// ── parent projects ───────────────────────────────────────────────────────────
+
+func TestResolveFromParentProjects(t *testing.T) {
+	t.Parallel()
+	child := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	parent := uuid.MustParse("00000000-0000-0000-0000-000000000002")
+	grandparent := uuid.MustParse("00000000-0000-0000-0000-000000000003")
+
+	fetcher := &fakeProjectFetcher{projects: map[uuid.UUID]dtrack.Project{
+		child:  {Name: "child", ParentRef: &dtrack.ParentRef{UUID: parent}},
+		parent: {Name: "parent", ParentRef: &dtrack.ParentRef{UUID: grandparent}},
+		grandparent: {Name: "grandparent", ExternalReferences: []dtrack.ExternalReference{
+			{Type: "vcs", URL: "https://github.com/myorg/monorepo"},
+		}},
+	}}
+	repo, err := newTestResolver(fetcher, "myorg/fallback").Resolve(t.Context(), child)
+	if err != nil || repo != "myorg/monorepo" {
+		t.Errorf("Resolve() = %q, %v, want myorg/monorepo from the grandparent", repo, err)
+	}
+}
+
+func TestResolveStopsAtParentCycles(t *testing.T) {
+	t.Parallel()
+	a := uuid.MustParse("00000000-0000-0000-0000-00000000000a")
+	b := uuid.MustParse("00000000-0000-0000-0000-00000000000b")
+	fetcher := &fakeProjectFetcher{projects: map[uuid.UUID]dtrack.Project{
+		a: {Name: "a", ParentRef: &dtrack.ParentRef{UUID: b}},
+		b: {Name: "b", ParentRef: &dtrack.ParentRef{UUID: a}},
+	}}
+
+	repo, err := newTestResolver(fetcher, "myorg/fallback").Resolve(t.Context(), a)
+	if err != nil || repo != "myorg/fallback" {
+		t.Errorf("Resolve() = %q, %v, want the fallback repo", repo, err)
+	}
+	if n := fetcher.projectCalls.Load(); n != maxParentDepth+1 {
+		t.Errorf("fetched %d projects, want %d", n, maxParentDepth+1)
+	}
+}
+
+func TestResolveMissingParentFallsBack(t *testing.T) {
+	t.Parallel()
+	child := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	fetcher := &fakeProjectFetcher{projects: map[uuid.UUID]dtrack.Project{
+		child: {Name: "child", ParentRef: &dtrack.ParentRef{UUID: uuid.MustParse("00000000-0000-0000-0000-0000000000ff")}},
+	}}
+	_, err := newTestResolver(fetcher, "").Resolve(t.Context(), child)
+	if !errors.Is(err, ErrNoRepo) {
+		t.Errorf("Resolve() error = %v, want ErrNoRepo", err)
+	}
+}
+
+// ── cache ─────────────────────────────────────────────────────────────────────
+
+func TestResolveCachesRepos(t *testing.T) {
+	t.Parallel()
+	projectID := uuid.MustParse("aaaaaaaa-0000-0000-0000-000000000001")
+	fetcher := &fakeProjectFetcher{project: dtrack.Project{
+		Name:               "my-service",
+		ExternalReferences: []dtrack.ExternalReference{{Type: "vcs", URL: "https://github.com/myorg/my-service"}},
+	}}
+	r := newTestResolver(fetcher, "")
+	now := time.Unix(0, 0)
+	r.now = func() time.Time { return now }
+
+	for range 3 {
+		if repo, err := r.Resolve(t.Context(), projectID); err != nil || repo != "myorg/my-service" {
+			t.Fatalf("Resolve() = %q, %v", repo, err)
+		}
+	}
+	if n := fetcher.projectCalls.Load(); n != 1 {
+		t.Errorf("fetched the project %d times, want 1 while cached", n)
+	}
+
+	now = now.Add(cacheTTL + time.Second)
+	if _, err := r.Resolve(t.Context(), projectID); err != nil {
+		t.Fatal(err)
+	}
+	if n := fetcher.projectCalls.Load(); n != 2 {
+		t.Errorf("fetched the project %d times, want 2 after the cache expired", n)
+	}
+}
+
+func TestResolveDoesNotCacheFailures(t *testing.T) {
+	t.Parallel()
+	projectID := uuid.MustParse("aaaaaaaa-0000-0000-0000-000000000001")
+	fetcher := &fakeProjectFetcher{projectErr: errors.New("connection refused")}
+	r := newTestResolver(fetcher, "")
+	for range 2 {
+		_, _ = r.Resolve(t.Context(), projectID)
+	}
+	if n := fetcher.projectCalls.Load(); n != 2 {
+		t.Errorf("fetched the project %d times, want 2 (failures are not cached)", n)
+	}
+}
+
+func TestCacheIsBounded(t *testing.T) {
+	t.Parallel()
+	r := newTestResolver(&fakeProjectFetcher{}, "")
+	for range cacheMax + 10 {
+		r.store(uuid.New(), "myorg/repo")
+	}
+	if n := len(r.cache); n > cacheMax {
+		t.Errorf("cache holds %d entries, want at most %d", n, cacheMax)
 	}
 }
 

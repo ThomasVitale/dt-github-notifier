@@ -67,6 +67,7 @@ type PolicyViolation struct {
 	Timestamp string `json:"timestamp"`
 	Message   string `json:"message"`
 	Condition struct {
+		UUID     string `json:"uuid"`
 		Subject  string `json:"subject"`
 		Operator string `json:"operator"`
 		Value    string `json:"value"`

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	dtrack "github.com/DependencyTrack/client-go"
 	"github.com/google/uuid"
@@ -21,6 +22,17 @@ import (
 // ErrNoRepo is returned when no GitHub repo could be resolved for a project
 // and no fallback repo is configured.
 var ErrNoRepo = errors.New("no GitHub repo could be resolved")
+
+const (
+	// cacheTTL is how long a resolved repo is reused, sparing Dependency-Track
+	// a lookup for each of the many notifications a BOM upload can trigger.
+	cacheTTL = 5 * time.Minute
+	// cacheMax bounds the number of cached projects.
+	cacheMax = 10_000
+	// maxParentDepth bounds how many ancestors are searched for a repo, which
+	// also guards against cycles in the project hierarchy.
+	maxParentDepth = 5
+)
 
 // projectFetcher is the subset of the DT API used by Resolver.
 // It is implemented by dtClientAdapter and faked in tests.
@@ -81,31 +93,62 @@ func (a *dtClientAdapter) getProperties(ctx context.Context, id uuid.UUID) ([]dt
 //  1. Project external reference of type "vcs" pointing to github.com
 //  2. Project property  group="github" name="repo"  value="org/repo"
 //  3. Project PURL     pkg:github/org/repo@version
-//  4. Fallback to the statically configured default repo
+//  4. The same, recursively, on the parent project
+//  5. Fallback to the statically configured default repo
+//
+// Resolved repos are cached for cacheTTL.
 type Resolver struct {
 	dt          projectFetcher
 	defaultRepo string // fallback, may be empty
+
+	mu    sync.Mutex
+	cache map[uuid.UUID]cachedRepo
+	now   func() time.Time
+}
+
+type cachedRepo struct {
+	repo    string
+	expires time.Time
 }
 
 // New returns a Resolver querying the Dependency-Track client returned by
 // newClient, which is called on first use (and again until it succeeds).
 func New(newClient func() (*dtrack.Client, error), defaultRepo string) *Resolver {
-	return &Resolver{dt: &dtClientAdapter{newClient: newClient}, defaultRepo: defaultRepo}
+	return newResolver(&dtClientAdapter{newClient: newClient}, defaultRepo)
+}
+
+func newResolver(dt projectFetcher, defaultRepo string) *Resolver {
+	return &Resolver{dt: dt, defaultRepo: defaultRepo, cache: make(map[uuid.UUID]cachedRepo), now: time.Now}
 }
 
 // Resolve returns the GitHub "org/repo" for the given DT project UUID.
 //
-// It falls back to defaultRepo only when Dependency-Track answered and the
-// project carries no GitHub hint (or no longer exists), and returns ErrNoRepo
-// when defaultRepo is empty too. Transient DT API failures are returned as
-// retryable errors rather than routed to the fallback repo.
+// It falls back to defaultRepo only when Dependency-Track answered and neither
+// the project nor its ancestors carry a GitHub hint (or the project no longer
+// exists), and returns ErrNoRepo when defaultRepo is empty too. Transient DT
+// API failures are returned as retryable errors rather than routed to the
+// fallback repo.
 func (r *Resolver) Resolve(ctx context.Context, projectUUID uuid.UUID) (string, error) {
+	if repo, ok := r.cached(projectUUID); ok {
+		return repo, nil
+	}
+	repo, err := r.resolve(ctx, projectUUID, projectUUID, 0)
+	if err != nil {
+		return "", err
+	}
+	r.store(projectUUID, repo)
+	return repo, nil
+}
+
+// resolve looks for a GitHub hint on projectUUID, which is the notified
+// project or, at depth > 0, one of its ancestors.
+func (r *Resolver) resolve(ctx context.Context, notified, projectUUID uuid.UUID, depth int) (string, error) {
 	project, err := r.dt.getProject(ctx, projectUUID)
 	switch {
 	case err == nil:
 	case apiStatus(err) == http.StatusNotFound:
 		slog.Warn("project not found in DT, falling back to default repo", "projectUUID", projectUUID)
-		return r.fallback(projectUUID)
+		return r.fallback(notified)
 	case apiStatus(err) == http.StatusUnauthorized || apiStatus(err) == http.StatusForbidden:
 		return "", fmt.Errorf("fetch project %s: DT API key lacks VIEW_PORTFOLIO or access to the project: %w", projectUUID, err)
 	default:
@@ -156,9 +199,52 @@ func (r *Resolver) Resolve(ctx context.Context, projectUUID uuid.UUID) (string, 
 		}
 	}
 
+	// 4. Parent project
+	if parent := project.ParentRef; parent != nil && parent.UUID != uuid.Nil {
+		if depth < maxParentDepth {
+			slog.Debug("no GitHub hint on project, trying its parent",
+				"project", project.Name, "parentUUID", parent.UUID)
+			return r.resolve(ctx, notified, parent.UUID, depth+1)
+		}
+		slog.Warn("project hierarchy too deep, not searching further ancestors",
+			"project", project.Name, "maxDepth", maxParentDepth)
+	}
+
 	slog.Warn("could not infer GitHub repo from project, falling back to default",
-		"project", project.Name, "projectUUID", projectUUID)
-	return r.fallback(projectUUID)
+		"project", project.Name, "projectUUID", notified)
+	return r.fallback(notified)
+}
+
+func (r *Resolver) cached(projectUUID uuid.UUID) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c, ok := r.cache[projectUUID]
+	if !ok || r.now().After(c.expires) {
+		return "", false
+	}
+	return c.repo, true
+}
+
+// store caches the repo of a project. When full, it evicts expired entries
+// first and then arbitrary ones, bounding memory use.
+func (r *Resolver) store(projectUUID uuid.UUID, repo string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
+	if len(r.cache) >= cacheMax {
+		for k, c := range r.cache {
+			if now.After(c.expires) {
+				delete(r.cache, k)
+			}
+		}
+	}
+	for k := range r.cache {
+		if len(r.cache) < cacheMax {
+			break
+		}
+		delete(r.cache, k)
+	}
+	r.cache[projectUUID] = cachedRepo{repo: repo, expires: now.Add(cacheTTL)}
 }
 
 func (r *Resolver) fallback(projectUUID uuid.UUID) (string, error) {

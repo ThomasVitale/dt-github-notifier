@@ -39,13 +39,19 @@ func TestEndToEnd(t *testing.T) {
 		path, auth string
 		body       map[string]any
 	}
-	gitHubRequests := make(chan gitHubRequest, 1)
-	gitHubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	gitHubRequests := make(chan gitHubRequest, 2)
+	gitHub := http.NewServeMux()
+	gitHub.HandleFunc("GET /search/issues", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"total_count":0,"items":[]}`))
+	})
+	gitHub.HandleFunc("POST /repos/{owner}/{repo}/issues", func(w http.ResponseWriter, r *http.Request) {
 		req := gitHubRequest{path: r.URL.Path, auth: r.Header.Get("Authorization")}
 		_ = json.NewDecoder(r.Body).Decode(&req.body)
 		gitHubRequests <- req
 		w.WriteHeader(http.StatusCreated)
-	}))
+		_, _ = w.Write([]byte(`{"html_url":"https://github.com/myorg/my-service/issues/1"}`))
+	})
+	gitHubServer := httptest.NewServer(gitHub)
 	defer gitHubServer.Close()
 
 	service := httptest.NewServer(newHandler(config.Config{
@@ -61,20 +67,29 @@ func TestEndToEnd(t *testing.T) {
 	mac := hmac.New(sha256.New, []byte("s3cr3t"))
 	mac.Write(body)
 
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, service.URL+"/webhook", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Webhook-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
+	signature := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+
+	// The second, identical notification (e.g. a DT retry) must not create
+	// another issue.
+	for range 2 {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, service.URL+"/webhook", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Webhook-Signature", signature)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
 		msg, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status = %d, want %d: %s", resp.StatusCode, http.StatusNoContent, msg)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("status = %d, want %d: %s", resp.StatusCode, http.StatusNoContent, msg)
+		}
+	}
+	if n := len(gitHubRequests); n != 1 {
+		t.Fatalf("created %d issues, want 1", n)
 	}
 
 	got := <-gitHubRequests

@@ -17,4 +17,4 @@ Labels: security, policy-violation, dependency-track, violation-state:fail
 **Message:**
 Package URL pkg:maven/foo/bar@1.2.3 is not allowed
 
-> This issue was created automatically by dt-github-notifier.
+> This issue was created automatically by dt-github-notifier (deduplication key: `dtgn-58f5f1cbe91bd0d7f5cfc14e761cf13b`).
