@@ -1,4 +1,5 @@
-package main
+// Package github creates issues through the GitHub REST API.
+package github
 
 import (
 	"bytes"
@@ -11,25 +12,31 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/thomasvitale/dt-github-notifier/internal/issue"
+	"github.com/thomasvitale/dt-github-notifier/internal/retryable"
 )
 
 // maxErrorBodyBytes bounds how much of a GitHub error response is read.
 const maxErrorBodyBytes = 64 << 10
 
-type gitHubClient struct {
+type Client struct {
 	baseURL    string
 	token      string
 	httpClient *http.Client
 }
 
-type gitHubIssueRequest struct {
+// issueRequest is the body of the "create an issue" endpoint.
+type issueRequest struct {
 	Title  string   `json:"title"`
 	Body   string   `json:"body"`
 	Labels []string `json:"labels"`
 }
 
-func newGitHubClient(baseURL, token string) *gitHubClient {
-	return &gitHubClient{
+// New returns a client for the GitHub REST API at baseURL (e.g.
+// https://api.github.com), authenticating with token.
+func New(baseURL, token string) *Client {
+	return &Client{
 		baseURL: strings.TrimSuffix(baseURL, "/"),
 		token:   token,
 		httpClient: &http.Client{
@@ -38,14 +45,14 @@ func newGitHubClient(baseURL, token string) *gitHubClient {
 	}
 }
 
-// createIssue creates an issue in the given "owner/repo".
-// Rate limiting, server errors and network failures are returned as retryable errors.
-func (c *gitHubClient) createIssue(ctx context.Context, repo string, issue gitHubIssueRequest) error {
-	if !isValidRepo(repo) {
+// CreateIssue creates an issue in the given "owner/repo". Rate limiting,
+// server errors and network failures are returned as retryable errors.
+func (c *Client) CreateIssue(ctx context.Context, repo string, i issue.Issue) error {
+	if !IsValidRepo(repo) {
 		return fmt.Errorf("invalid GitHub repo %q", repo)
 	}
 
-	payload, err := json.Marshal(issue)
+	payload, err := json.Marshal(issueRequest{Title: i.Title, Body: i.Body, Labels: i.Labels})
 	if err != nil {
 		return fmt.Errorf("marshal issue: %w", err)
 	}
@@ -63,7 +70,7 @@ func (c *gitHubClient) createIssue(ctx context.Context, repo string, issue gitHu
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return retryable(fmt.Errorf("execute request: %w", err), 0)
+		return retryable.Wrap(fmt.Errorf("execute request: %w", err), 0)
 	}
 	defer resp.Body.Close()
 
@@ -78,7 +85,7 @@ func (c *gitHubClient) createIssue(ctx context.Context, repo string, issue gitHu
 	err = fmt.Errorf("github API returned status %d: %s", resp.StatusCode, ghErr.Message)
 
 	if isRateLimited(resp, ghErr.Message) || resp.StatusCode >= http.StatusInternalServerError {
-		return retryable(err, retryAfter(resp.Header, time.Now()))
+		return retryable.Wrap(err, retryAfter(resp.Header, time.Now()))
 	}
 	return err
 }
@@ -119,7 +126,8 @@ func retryAfter(h http.Header, now time.Time) time.Duration {
 // hyphens, repo names may also contain dots and underscores.
 var repoPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$`)
 
-func isValidRepo(repo string) bool {
+// IsValidRepo reports whether repo is a well-formed GitHub "owner/repo".
+func IsValidRepo(repo string) bool {
 	if !repoPattern.MatchString(repo) {
 		return false
 	}

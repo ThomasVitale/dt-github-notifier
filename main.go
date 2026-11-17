@@ -1,3 +1,5 @@
+// Command dt-github-notifier receives Dependency-Track webhook notifications
+// and creates GitHub issues for policy violations and vulnerabilities.
 package main
 
 import (
@@ -11,11 +13,16 @@ import (
 	"time"
 
 	dtrack "github.com/DependencyTrack/client-go"
+
+	"github.com/thomasvitale/dt-github-notifier/internal/config"
+	"github.com/thomasvitale/dt-github-notifier/internal/github"
+	"github.com/thomasvitale/dt-github-notifier/internal/resolver"
+	"github.com/thomasvitale/dt-github-notifier/internal/webhook"
 )
 
 // shutdownTimeout bounds how long in-flight requests may run after SIGTERM.
-// It is above requestTimeout so that started notifications can complete.
-const shutdownTimeout = requestTimeout + 2*time.Second
+// It is above webhook.RequestTimeout so that started notifications can complete.
+const shutdownTimeout = webhook.RequestTimeout + 2*time.Second
 
 func main() {
 	if err := run(); err != nil {
@@ -25,35 +32,19 @@ func main() {
 }
 
 func run() error {
-	cfg, err := configFromEnv()
+	cfg, err := config.FromEnv()
 	if err != nil {
 		return err
 	}
 
-	newDTClient := func() (*dtrack.Client, error) {
-		return dtrack.NewClient(cfg.DTBaseURL,
-			dtrack.WithAPIKey(cfg.DTAPIKey),
-			dtrack.WithUserAgent("dt-github-notifier"),
-			// Below requestTimeout, so that creating the client on the first
-			// request still leaves time to process the notification.
-			dtrack.WithTimeout(5*time.Second),
-		)
-	}
-
-	resolver := newRepoResolver(newDTClient, cfg.GitHubRepo)
-	ghClient := newGitHubClient(cfg.GitHubAPIURL, cfg.GitHubToken)
-	handler := newWebhookHandler(ghClient, resolver, cfg.WebhookSecret)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/webhook", handler.handleWebhook)
-	mux.HandleFunc("/healthz", handleHealthz)
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.LogLevel})))
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
-		Handler:           mux,
+		Handler:           newHandler(cfg),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      requestTimeout + 5*time.Second,
+		WriteTimeout:      webhook.RequestTimeout + 5*time.Second,
 		IdleTimeout:       30 * time.Second,
 	}
 
@@ -89,4 +80,27 @@ func run() error {
 		return err
 	}
 	return nil
+}
+
+// newHandler wires the service components and routes.
+func newHandler(cfg config.Config) http.Handler {
+	newDTClient := func() (*dtrack.Client, error) {
+		return dtrack.NewClient(cfg.DTBaseURL,
+			dtrack.WithAPIKey(cfg.DTAPIKey),
+			dtrack.WithUserAgent("dt-github-notifier"),
+			// Below webhook.RequestTimeout, so that creating the client on the
+			// first request still leaves time to process the notification.
+			dtrack.WithTimeout(5*time.Second),
+		)
+	}
+
+	repos := resolver.New(newDTClient, cfg.GitHubRepo)
+	issues := github.New(cfg.GitHubAPIURL, cfg.GitHubToken)
+
+	mux := http.NewServeMux()
+	mux.Handle("/webhook", webhook.New(issues, repos, cfg.WebhookSecret))
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	})
+	return mux
 }

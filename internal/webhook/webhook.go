@@ -1,4 +1,6 @@
-package main
+// Package webhook receives Dependency-Track notifications and turns them into
+// GitHub issues.
+package webhook
 
 import (
 	"context"
@@ -16,6 +18,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/thomasvitale/dt-github-notifier/internal/issue"
+	"github.com/thomasvitale/dt-github-notifier/internal/notification"
+	"github.com/thomasvitale/dt-github-notifier/internal/resolver"
+	"github.com/thomasvitale/dt-github-notifier/internal/retryable"
 )
 
 const (
@@ -24,10 +31,10 @@ const (
 	// in full to verify their signature.
 	maxRequestBodyBytes = 10 << 20
 
-	// requestTimeout bounds the processing of a notification. It must stay
+	// RequestTimeout bounds the processing of a notification. It must stay
 	// below the 10 s Dependency-Track waits for a webhook response, otherwise
 	// DT gives up and retries a notification that may have been processed.
-	requestTimeout = 8 * time.Second
+	RequestTimeout = 8 * time.Second
 
 	signatureHeader = "X-Webhook-Signature"
 )
@@ -35,18 +42,17 @@ const (
 // errUnhandledGroup is returned for notification groups that create no issue.
 var errUnhandledGroup = errors.New("unhandled notification group")
 
-type webhookHandler struct {
-	gh       *gitHubClient
-	resolver *repoResolver
-	secret   []byte // empty when signature verification is disabled
-	timeout  time.Duration
+// IssueCreator creates GitHub issues.
+type IssueCreator interface {
+	CreateIssue(ctx context.Context, repo string, i issue.Issue) error
 }
 
-func newWebhookHandler(gh *gitHubClient, resolver *repoResolver, secret string) *webhookHandler {
-	return &webhookHandler{gh: gh, resolver: resolver, secret: []byte(secret), timeout: requestTimeout}
+// RepoResolver resolves the GitHub "owner/repo" of a Dependency-Track project.
+type RepoResolver interface {
+	Resolve(ctx context.Context, projectUUID uuid.UUID) (string, error)
 }
 
-// handleWebhook creates a GitHub issue for a Dependency-Track notification.
+// Handler creates a GitHub issue for each Dependency-Track notification.
 //
 // Response codes follow the retry semantics of the DT webhook publisher, which
 // retries 429, 502, 503 and 504 and gives up on any other non-2xx status:
@@ -54,7 +60,20 @@ func newWebhookHandler(gh *gitHubClient, resolver *repoResolver, secret string) 
 //   - 400 / 401 / 413 / 422 for requests that will never succeed
 //   - 500 for permanent failures (e.g. GitHub rejected the issue)
 //   - 503 for transient failures (DT API or GitHub unavailable, rate limits)
-func (h *webhookHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
+type Handler struct {
+	issues  IssueCreator
+	repos   RepoResolver
+	secret  []byte // empty when signature verification is disabled
+	timeout time.Duration
+}
+
+// New returns a Handler. When secret is not empty, requests must carry a valid
+// X-Webhook-Signature computed with it.
+func New(issues IssueCreator, repos RepoResolver, secret string) *Handler {
+	return &Handler{issues: issues, repos: repos, secret: []byte(secret), timeout: RequestTimeout}
+}
+
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -79,7 +98,7 @@ func (h *webhookHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	n, err := parseNotification(body)
+	n, err := notification.Parse(body)
 	if err != nil {
 		slog.Error("failed to parse notification body", "err", err)
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -92,77 +111,82 @@ func (h *webhookHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), h.timeout)
 	defer cancel()
 
-	repo, issue, err := h.buildIssue(ctx, n)
+	repo, i, err := h.buildIssue(ctx, n)
 	if errors.Is(err, errUnhandledGroup) {
 		log.Info("ignoring unhandled notification group")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	if err == nil {
-		err = h.gh.createIssue(ctx, repo, issue)
+		err = h.issues.CreateIssue(ctx, repo, i)
 	}
 	if err != nil {
-		writeError(w, log.With("repo", repo, "title", issue.Title), err)
+		writeError(w, log.With("repo", repo, "title", i.Title), err)
 		return
 	}
 
-	log.Info("created GitHub issue", "repo", repo, "title", issue.Title)
+	log.Info("created GitHub issue", "repo", repo, "title", i.Title)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // buildIssue builds the issue for a notification and resolves the repo of
 // the project it concerns.
-func (h *webhookHandler) buildIssue(ctx context.Context, n notification) (string, gitHubIssueRequest, error) {
+func (h *Handler) buildIssue(ctx context.Context, n notification.Notification) (string, issue.Issue, error) {
 	var (
-		p     project
-		issue gitHubIssueRequest
+		p   notification.Project
+		i   issue.Issue
+		err error
 	)
 	switch n.Group {
-	case groupPolicyViolation:
-		s, err := decodeSubject[policyViolationSubject](n)
-		if err != nil {
-			return "", issue, err
+	case notification.GroupPolicyViolation:
+		var s notification.PolicyViolationSubject
+		if s, err = notification.DecodeSubject[notification.PolicyViolationSubject](n); err == nil {
+			p = s.Project
+			i, err = issue.ForPolicyViolation(s)
 		}
-		p, issue = s.Project, buildPolicyViolationIssue(s)
-	case groupNewVulnerability:
-		s, err := decodeSubject[newVulnerabilitySubject](n)
-		if err != nil {
-			return "", issue, err
+	case notification.GroupNewVulnerability:
+		var s notification.NewVulnerabilitySubject
+		if s, err = notification.DecodeSubject[notification.NewVulnerabilitySubject](n); err == nil {
+			p = s.Project
+			i, err = issue.ForNewVulnerability(s)
 		}
-		p, issue = s.Project, buildNewVulnerabilityIssue(s)
-	case groupNewVulnerableDependency:
-		s, err := decodeSubject[newVulnerableDependencySubject](n)
-		if err != nil {
-			return "", issue, err
+	case notification.GroupNewVulnerableDependency:
+		var s notification.NewVulnerableDependencySubject
+		if s, err = notification.DecodeSubject[notification.NewVulnerableDependencySubject](n); err == nil {
+			p = s.Project
+			i, err = issue.ForNewVulnerableDependency(s)
 		}
-		p, issue = s.Project, buildNewVulnerableDependencyIssue(s)
 	default:
-		return "", issue, errUnhandledGroup
+		return "", i, errUnhandledGroup
+	}
+	if err != nil {
+		return "", i, err
 	}
 
 	projectUUID, err := uuid.Parse(p.UUID)
 	if err != nil {
-		return "", issue, fmt.Errorf("%w: invalid project UUID %q", errInvalidPayload, p.UUID)
+		return "", i, fmt.Errorf("%w: invalid project UUID %q", notification.ErrInvalidPayload, p.UUID)
 	}
-	repo, err := h.resolver.Resolve(ctx, projectUUID)
-	return repo, issue, err
+	repo, err := h.repos.Resolve(ctx, projectUUID)
+	return repo, i, err
 }
 
 // writeError maps a processing error to the response status that makes
 // Dependency-Track retry transient failures only.
 func writeError(w http.ResponseWriter, log *slog.Logger, err error) {
-	var retryErr *retryableError
-	switch {
-	case errors.As(err, &retryErr):
+	if after, ok := retryable.As(err); ok {
 		log.Warn("transient failure, asking Dependency-Track to retry", "err", err)
-		if retryErr.retryAfter > 0 {
-			w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(retryErr.retryAfter.Seconds()))))
+		if after > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(after.Seconds()))))
 		}
 		http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
-	case errors.Is(err, errInvalidPayload):
+		return
+	}
+	switch {
+	case errors.Is(err, notification.ErrInvalidPayload):
 		log.Error("invalid notification", "err", err)
 		http.Error(w, "bad request", http.StatusBadRequest)
-	case errors.Is(err, errNoRepo):
+	case errors.Is(err, resolver.ErrNoRepo):
 		log.Error("cannot route notification to a GitHub repo", "err", err)
 		http.Error(w, "no GitHub repo for project", http.StatusUnprocessableEntity)
 	default:

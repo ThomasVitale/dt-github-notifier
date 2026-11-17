@@ -1,4 +1,4 @@
-package main
+package resolver
 
 import (
 	"context"
@@ -10,6 +10,9 @@ import (
 
 	dtrack "github.com/DependencyTrack/client-go"
 	"github.com/google/uuid"
+
+	"github.com/thomasvitale/dt-github-notifier/internal/github"
+	"github.com/thomasvitale/dt-github-notifier/internal/retryable"
 )
 
 // ── fake projectFetcher ───────────────────────────────────────────────────────
@@ -31,8 +34,8 @@ func (f *fakeProjectFetcher) getProperties(_ context.Context, _ uuid.UUID) ([]dt
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-func newTestResolver(fetcher projectFetcher, defaultRepo string) *repoResolver {
-	return &repoResolver{dt: fetcher, defaultRepo: defaultRepo}
+func newTestResolver(fetcher projectFetcher, defaultRepo string) *Resolver {
+	return &Resolver{dt: fetcher, defaultRepo: defaultRepo}
 }
 
 // ── repoFromURL ───────────────────────────────────────────────────────────────
@@ -188,7 +191,7 @@ func TestResolve(t *testing.T) {
 		defaultRepo string
 		wantRepo    string
 		wantErr     error // checked with errors.Is
-		wantRetry   bool  // error must be a *retryableError
+		wantRetry   bool  // error must be retryable
 	}{
 		{
 			name: "resolves from vcs external reference",
@@ -299,12 +302,12 @@ func TestResolve(t *testing.T) {
 			wantErr:     forbidden,
 		},
 		{
-			name: "returns errNoRepo when nothing resolves and no default set",
+			name: "returns ErrNoRepo when nothing resolves and no default set",
 			fetcher: &fakeProjectFetcher{
 				project: dtrack.Project{Name: "my-service"},
 			},
 			defaultRepo: "",
-			wantErr:     errNoRepo,
+			wantErr:     ErrNoRepo,
 		},
 		{
 			name: "vcs ref takes priority over property",
@@ -376,14 +379,14 @@ func TestResolve(t *testing.T) {
 			t.Parallel()
 			r := newTestResolver(tc.fetcher, tc.defaultRepo)
 			got, err := r.Resolve(context.Background(), projectID)
-			var retryErr *retryableError
+			_, retry := retryable.As(err)
 			switch {
 			case tc.wantRetry:
-				if !errors.As(err, &retryErr) {
+				if !retry {
 					t.Fatalf("Resolve() error = %v, want retryable error", err)
 				}
 			case tc.wantErr != nil:
-				if errors.As(err, &retryErr) {
+				if retry {
 					t.Fatalf("Resolve() error = %v is retryable, want permanent", err)
 				}
 				if !errors.Is(err, tc.wantErr) {
@@ -431,15 +434,14 @@ func TestDTClientAdapterIsCreatedLazily(t *testing.T) {
 	srv := newFakeDT(t, projectID, &available)
 
 	var created atomic.Int32
-	r := newRepoResolver(func() (*dtrack.Client, error) {
+	r := New(func() (*dtrack.Client, error) {
 		created.Add(1)
 		return dtrack.NewClient(srv.URL, dtrack.WithAPIKey("test-key"))
 	}, "")
 
 	// DT unavailable: the failure is retryable and nothing is cached.
 	_, err := r.Resolve(t.Context(), projectID)
-	var retryErr *retryableError
-	if !errors.As(err, &retryErr) {
+	if _, retry := retryable.As(err); !retry {
 		t.Fatalf("Resolve() with DT unavailable error = %v, want retryable error", err)
 	}
 
@@ -453,4 +455,42 @@ func TestDTClientAdapterIsCreatedLazily(t *testing.T) {
 	if n := created.Load(); n != 2 {
 		t.Errorf("client created %d times, want 2 (one failed attempt, then reused)", n)
 	}
+}
+
+// ── fuzzing ───────────────────────────────────────────────────────────────────
+
+// Every repo extracted from untrusted DT data must be a valid "owner/repo",
+// as it ends up in the GitHub API request path.
+
+func FuzzRepoFromURL(f *testing.F) {
+	for _, s := range []string{
+		"https://github.com/myorg/myrepo",
+		"https://github.com/myorg/myrepo.git",
+		"https://github.com/myorg/myrepo/tree/main",
+		"https://github.com/myorg/..",
+		"git@github.com:myorg/myrepo.git",
+	} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		if repo, ok := repoFromURL(s); ok && !github.IsValidRepo(repo) {
+			t.Errorf("repoFromURL(%q) = %q, which is not a valid repo", s, repo)
+		}
+	})
+}
+
+func FuzzRepoFromPURL(f *testing.F) {
+	for _, s := range []string{
+		"pkg:github/myorg/myrepo@1.0.0",
+		"pkg:github/myorg/myrepo?arch=amd64#sub",
+		"pkg:github/myorg/..",
+		"pkg:maven/org.apache/commons@1",
+	} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		if repo, ok := repoFromPURL(s); ok && !github.IsValidRepo(repo) {
+			t.Errorf("repoFromPURL(%q) = %q, which is not a valid repo", s, repo)
+		}
+	})
 }

@@ -99,13 +99,14 @@ All tasks are defined in `Taskfile.yml` and run with [Task](https://taskfile.dev
 | `DT_API_KEY` | Yes | Dependency-Track API key (see [permissions](#dependency-track-api-key-permissions)) |
 | `DT_WEBHOOK_SECRET` | No (recommended) | Signing secret of the Dependency-Track webhook alert, used to verify `X-Webhook-Signature` |
 | `PORT` | No | Listen port (default: 8080) |
+| `LOG_LEVEL` | No | `debug`, `info`, `warn` or `error` (default: `info`); logs are JSON on stderr |
 | `KO_DOCKER_REPO` | Yes (build) | Registry to push images to |
 
 ---
 
 ## Deploying
 
-### 1. Edit knative.yaml
+### 1. Edit deploy/knative.yaml
 
 Optionally set the `GITHUB_REPO` fallback, and adjust `DT_BASE_URL` to your Dependency-Track API server.
 
@@ -131,7 +132,7 @@ KO_DOCKER_REPO=ghcr.io/myorg/dt-github-notifier task deploy
 ```
 
 ko apply will cross-compile for linux/amd64 and linux/arm64, push a multi-arch manifest,
-substitute the real image digest into knative.yaml, and apply it to the cluster.
+substitute the real image digest into deploy/knative.yaml, and apply it to the cluster.
 
 ### 5. Verify
 
@@ -184,7 +185,7 @@ With Portfolio Access Control enabled, the key's team also needs access to the p
 
 The service is configured with min-scale: 0. When idle for ~60 s Knative terminates all
 pods. The Knative Activator wakes the service on the next request (typically 1-2 s for
-this small binary). Change min-scale to 1 in knative.yaml to keep a pod always warm.
+this small binary). Change min-scale to 1 in deploy/knative.yaml to keep a pod always warm.
 
 ---
 
@@ -204,6 +205,21 @@ Create these labels in your repo before first use:
 
 ---
 
+## Project structure
+
+```
+main.go                                  wiring, logging, HTTP server lifecycle
+internal/config/                         configuration from environment variables
+internal/webhook/                        HTTP handler: signature, parsing, status codes
+internal/notification/                   Dependency-Track v5 notification payloads
+internal/notification/notificationtest/  payload fixtures for tests
+internal/resolver/                       project → GitHub repo resolution via the DT API
+internal/issue/                          issue rendering (Markdown templates in templates/)
+internal/github/                         GitHub REST API client
+internal/retryable/                      transient-error marker mapped to HTTP 503
+deploy/knative.yaml                      Knative Service manifest
+```
+
 ## Development
 
 ```bash
@@ -215,13 +231,14 @@ task check              # go.mod tidiness, golangci-lint, govulncheck
 task image:update-base  # pin the ko base image to its latest digest
 ```
 
-Issue bodies are covered by golden files in `testdata/golden`. After an intended format change,
-regenerate them with `go test -run TestIssueGolden -update` and review the diff.
+Issue bodies are rendered from the templates in `internal/issue/templates` and covered by golden
+files in `internal/issue/testdata/golden`. After an intended format change, regenerate them with
+`go test ./internal/issue -run TestGolden -update` and review the diff.
 
 The parsers and sanitizers of untrusted input have fuzz tests, e.g.:
 
 ```bash
-go test -run '^$' -fuzz FuzzRepoFromURL -fuzztime 30s
+go test ./internal/resolver -run '^$' -fuzz FuzzRepoFromURL -fuzztime 30s
 ```
 
 `task vuln` fails on any vulnerability in code the service calls, except those listed with a

@@ -1,4 +1,5 @@
-package main
+// Package resolver resolves the GitHub repository of a Dependency-Track project.
+package resolver
 
 import (
 	"context"
@@ -12,10 +13,17 @@ import (
 
 	dtrack "github.com/DependencyTrack/client-go"
 	"github.com/google/uuid"
+
+	"github.com/thomasvitale/dt-github-notifier/internal/github"
+	"github.com/thomasvitale/dt-github-notifier/internal/retryable"
 )
 
-// projectFetcher is the subset of the DT client used by repoResolver.
-// It is satisfied by *dtrack.Client and can be faked in tests.
+// ErrNoRepo is returned when no GitHub repo could be resolved for a project
+// and no fallback repo is configured.
+var ErrNoRepo = errors.New("no GitHub repo could be resolved")
+
+// projectFetcher is the subset of the DT API used by Resolver.
+// It is implemented by dtClientAdapter and faked in tests.
 type projectFetcher interface {
 	getProject(ctx context.Context, id uuid.UUID) (dtrack.Project, error)
 	getProperties(ctx context.Context, id uuid.UUID) ([]dtrack.ProjectProperty, error)
@@ -67,29 +75,31 @@ func (a *dtClientAdapter) getProperties(ctx context.Context, id uuid.UUID) ([]dt
 	return page.Items, nil
 }
 
-// repoResolver resolves a GitHub "org/repo" string from a Dependency-Track project.
+// Resolver resolves a GitHub "org/repo" string from a Dependency-Track project.
 //
 // Resolution is attempted in this order:
 //  1. Project external reference of type "vcs" pointing to github.com
 //  2. Project property  group="github" name="repo"  value="org/repo"
 //  3. Project PURL     pkg:github/org/repo@version
 //  4. Fallback to the statically configured default repo
-type repoResolver struct {
+type Resolver struct {
 	dt          projectFetcher
 	defaultRepo string // fallback, may be empty
 }
 
-func newRepoResolver(newClient func() (*dtrack.Client, error), defaultRepo string) *repoResolver {
-	return &repoResolver{dt: &dtClientAdapter{newClient: newClient}, defaultRepo: defaultRepo}
+// New returns a Resolver querying the Dependency-Track client returned by
+// newClient, which is called on first use (and again until it succeeds).
+func New(newClient func() (*dtrack.Client, error), defaultRepo string) *Resolver {
+	return &Resolver{dt: &dtClientAdapter{newClient: newClient}, defaultRepo: defaultRepo}
 }
 
 // Resolve returns the GitHub "org/repo" for the given DT project UUID.
 //
 // It falls back to defaultRepo only when Dependency-Track answered and the
-// project carries no GitHub hint (or no longer exists), and returns errNoRepo
+// project carries no GitHub hint (or no longer exists), and returns ErrNoRepo
 // when defaultRepo is empty too. Transient DT API failures are returned as
 // retryable errors rather than routed to the fallback repo.
-func (r *repoResolver) Resolve(ctx context.Context, projectUUID uuid.UUID) (string, error) {
+func (r *Resolver) Resolve(ctx context.Context, projectUUID uuid.UUID) (string, error) {
 	project, err := r.dt.getProject(ctx, projectUUID)
 	switch {
 	case err == nil:
@@ -99,7 +109,7 @@ func (r *repoResolver) Resolve(ctx context.Context, projectUUID uuid.UUID) (stri
 	case apiStatus(err) == http.StatusUnauthorized || apiStatus(err) == http.StatusForbidden:
 		return "", fmt.Errorf("fetch project %s: DT API key lacks VIEW_PORTFOLIO or access to the project: %w", projectUUID, err)
 	default:
-		return "", retryable(fmt.Errorf("fetch project %s: %w", projectUUID, err), 0)
+		return "", retryable.Wrap(fmt.Errorf("fetch project %s: %w", projectUUID, err), 0)
 	}
 
 	// 1. External references — look for a vcs ref pointing at github.com
@@ -122,12 +132,12 @@ func (r *repoResolver) Resolve(ctx context.Context, projectUUID uuid.UUID) (stri
 			"project", project.Name, "err", err)
 	case apiStatus(err) == http.StatusNotFound:
 	default:
-		return "", retryable(fmt.Errorf("fetch properties of project %s: %w", projectUUID, err), 0)
+		return "", retryable.Wrap(fmt.Errorf("fetch properties of project %s: %w", projectUUID, err), 0)
 	}
 	for _, p := range props {
 		if strings.EqualFold(p.Group, "github") && strings.EqualFold(p.Name, "repo") {
 			repo := strings.TrimSpace(p.Value)
-			if isValidRepo(repo) {
+			if github.IsValidRepo(repo) {
 				slog.Debug("resolved repo from project property",
 					"project", project.Name, "repo", repo)
 				return repo, nil
@@ -151,11 +161,11 @@ func (r *repoResolver) Resolve(ctx context.Context, projectUUID uuid.UUID) (stri
 	return r.fallback(projectUUID)
 }
 
-func (r *repoResolver) fallback(projectUUID uuid.UUID) (string, error) {
+func (r *Resolver) fallback(projectUUID uuid.UUID) (string, error) {
 	if r.defaultRepo != "" {
 		return r.defaultRepo, nil
 	}
-	return "", fmt.Errorf("%w for project %s and GITHUB_REPO is not set", errNoRepo, projectUUID)
+	return "", fmt.Errorf("%w for project %s and GITHUB_REPO is not set", ErrNoRepo, projectUUID)
 }
 
 // apiStatus returns the HTTP status of a DT API error, or 0 for other errors.
@@ -183,7 +193,7 @@ func repoFromURL(rawURL string) (string, bool) {
 		return "", false
 	}
 	repo := parts[0] + "/" + strings.TrimSuffix(parts[1], ".git")
-	return repo, isValidRepo(repo)
+	return repo, github.IsValidRepo(repo)
 }
 
 // repoFromPURL extracts "org/repo" from a pkg:github/org/repo PURL.
@@ -201,5 +211,5 @@ func repoFromPURL(purl string) (string, bool) {
 		rest = rest[:i]
 	}
 	// Should now be "org/repo"
-	return rest, isValidRepo(rest)
+	return rest, github.IsValidRepo(rest)
 }

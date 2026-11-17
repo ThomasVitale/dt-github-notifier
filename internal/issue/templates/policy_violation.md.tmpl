@@ -1,0 +1,18 @@
+## :rotating_light: Policy Violation Detected
+
+| Field | Value |
+|---|---|
+| **Project** | {{ cell (projectName .Project) }} |
+| **Component** | {{ cell (componentName .Component) }} |
+| **Policy** | {{ cell .PolicyViolation.Condition.Policy.Name }} |
+| **Violation State** | {{ cell .PolicyViolation.Condition.Policy.ViolationState }} |
+| **Type** | {{ cell .PolicyViolation.Type }} |
+| **Condition** | {{ with .PolicyViolation.Condition }}{{ cell .Subject }} {{ cell .Operator }} {{ cell .Value }}{{ end }} |
+| **Timestamp** | {{ cell .PolicyViolation.Timestamp }} |
+{{- with .PolicyViolation.Message }}
+
+**Message:**
+{{ text . }}
+{{- end }}
+
+{{ template "footer" }}

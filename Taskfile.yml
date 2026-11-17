@@ -117,9 +117,9 @@ tasks:
       - ko build --platform=$KO_DEFAULTPLATFORMS --bare .
 
   resolve:
-    desc: Render knative.yaml with the real image digest substituted in (for GitOps)
+    desc: Render deploy/knative.yaml with the real image digest substituted in (for GitOps)
     cmds:
-      - ko resolve --platform=$KO_DEFAULTPLATFORMS --bare -f knative.yaml
+      - ko resolve --platform=$KO_DEFAULTPLATFORMS --bare -f deploy/knative.yaml
 
   # =============================================
   # Deployment
@@ -128,12 +128,12 @@ tasks:
   deploy:
     desc: Build, push, and apply the Knative Service to the cluster
     cmds:
-      - ko apply --platform=$KO_DEFAULTPLATFORMS --bare -f knative.yaml
+      - ko apply --platform=$KO_DEFAULTPLATFORMS --bare -f deploy/knative.yaml
 
   undeploy:
     desc: Remove the Knative Service from the cluster
     cmds:
-      - kubectl delete -f knative.yaml --ignore-not-found
+      - kubectl delete -f deploy/knative.yaml --ignore-not-found
 
   secret:
     desc: "Create the GitHub token + DT API key (+ optional webhook signing secret) secret (usage: GITHUB_TOKEN=ghp_xxx DT_API_KEY=xxx DT_WEBHOOK_SECRET=xxx task secret)"
