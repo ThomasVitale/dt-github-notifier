@@ -1,0 +1,96 @@
+# https://taskfile.dev
+
+version: '3'
+
+env:
+  # Your container registry. Override via env.
+  # e.g.  KO_DOCKER_REPO=ghcr.io/myorg/dt-github-notifier task deploy
+  KO_DOCKER_REPO: '{{.KO_DOCKER_REPO | default "ghcr.io/yourorg/dt-github-notifier"}}'
+  # Platforms to build for. Override with e.g. KO_DEFAULTPLATFORMS=all
+  KO_DEFAULTPLATFORMS: '{{.KO_DEFAULTPLATFORMS | default "linux/amd64,linux/arm64"}}'
+
+vars:
+  NAMESPACE: dependency-track
+  SERVICE_NAME: dt-github-notifier
+
+tasks:
+
+  # =============================================
+  # Development
+  # =============================================
+
+  build:
+    desc: Compile locally (no image push) to catch errors fast
+    cmds:
+      - go build ./...
+
+  fmt:
+    desc: Run gofmt
+    cmds:
+      - gofmt -w .
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  # =============================================
+  # Testing
+  # =============================================
+
+  test:
+    desc: Run unit tests
+    cmds:
+      - go test -race ./...
+
+  # =============================================
+  # Image Operations
+  # =============================================
+
+  push:
+    desc: Build multi-arch image and push to registry (no deploy)
+    cmds:
+      - ko build --platform=$KO_DEFAULTPLATFORMS --bare .
+
+  resolve:
+    desc: Render knative.yaml with the real image digest substituted in (for GitOps)
+    cmds:
+      - ko resolve --platform=$KO_DEFAULTPLATFORMS --bare -f knative.yaml
+
+  # =============================================
+  # Deployment
+  # =============================================
+
+  deploy:
+    desc: Build, push, and apply the Knative Service to the cluster
+    cmds:
+      - ko apply --platform=$KO_DEFAULTPLATFORMS --bare -f knative.yaml
+
+  undeploy:
+    desc: Remove the Knative Service from the cluster
+    cmds:
+      - kubectl delete -f knative.yaml --ignore-not-found
+
+  secret:
+    desc: "Create the GitHub token + DT API key secret (usage: GITHUB_TOKEN=ghp_xxx DT_API_KEY=xxx task secret)"
+    requires:
+      vars: [GITHUB_TOKEN, DT_API_KEY]
+    cmds:
+      - |
+        kubectl create secret generic {{.SERVICE_NAME}}-secret \
+          --from-literal=github-token="$GITHUB_TOKEN" \
+          --from-literal=dt-api-key="$DT_API_KEY" \
+          --namespace {{.NAMESPACE}} \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+  status:
+    desc: Show the Knative Service status
+    cmds:
+      - kubectl get ksvc {{.SERVICE_NAME}} -n {{.NAMESPACE}}
+      - echo ""
+      - kubectl get pods -n {{.NAMESPACE}} -l serving.knative.dev/service={{.SERVICE_NAME}}
+
+  logs:
+    desc: Tail logs from the bridge (works even with scale-to-zero)
+    cmds:
+      - kubectl logs -n {{.NAMESPACE}} -l serving.knative.dev/service={{.SERVICE_NAME}} -c bridge --tail=100 -f

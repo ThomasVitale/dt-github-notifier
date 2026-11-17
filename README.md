@@ -42,16 +42,18 @@ All other groups are acknowledged silently (HTTP 204).
 
 | Tool | Purpose |
 |---|---|
-| [ko](https://ko.build/install/) | Build and push multi-arch images without a Dockerfile |
-| kubectl | Apply manifests |
+| [devenv](https://devenv.sh/getting-started/) | Reproducible development environment (Go, ko, kubectl, Task) |
+| [direnv](https://direnv.net) (optional) | Activate the devenv shell automatically when entering the directory |
 | Knative Serving | Already installed in your cluster |
 
-Install ko:
+Enter the development environment:
 ```bash
-go install github.com/google/ko@latest
-# or
-brew install ko
+devenv shell
+# or, with direnv
+direnv allow
 ```
+
+All tasks are defined in `Taskfile.yml` and run with [Task](https://taskfile.dev). List them with `task --list`.
 
 ---
 
@@ -75,7 +77,7 @@ Change the GITHUB_REPO env value to your repo.
 ### 2. Create the GitHub token secret
 
 ```bash
-GITHUB_TOKEN=ghp_yourTokenHere DT_API_KEY=xxx make secret
+GITHUB_TOKEN=ghp_yourTokenHere DT_API_KEY=xxx task secret
 ```
 
 ### 3. Log in to your registry
@@ -87,7 +89,7 @@ ko login ghcr.io -u $GITHUB_USER --password-stdin <<< $GITHUB_TOKEN
 ### 4. Build, push, and deploy in one command
 
 ```bash
-KO_DOCKER_REPO=ghcr.io/myorg/dt-github-notifier make deploy
+KO_DOCKER_REPO=ghcr.io/myorg/dt-github-notifier task deploy
 ```
 
 ko apply will cross-compile for linux/amd64 and linux/arm64, push a multi-arch manifest,
@@ -96,7 +98,7 @@ substitute the real image digest into knative.yaml, and apply it to the cluster.
 ### 5. Verify
 
 ```bash
-make status
+task status
 ```
 
 ---
@@ -104,7 +106,7 @@ make status
 ## GitOps / CI - render manifests without applying
 
 ```bash
-KO_DOCKER_REPO=ghcr.io/myorg/dt-github-notifier make resolve > release/knative-resolved.yaml
+KO_DOCKER_REPO=ghcr.io/myorg/dt-github-notifier task resolve > release/knative-resolved.yaml
 ```
 
 The resolved file contains the full image digest so your GitOps tooling can apply it directly.
@@ -150,12 +152,12 @@ Create these labels in your repo before first use:
 ## Useful commands
 
 ```bash
-make build      # compile locally
-make test       # run tests
-make push       # build+push image only (no deploy)
-make resolve    # render manifest with real digest (for GitOps)
-make deploy     # build+push+apply
-make undeploy   # remove from cluster
-make status     # show ksvc + pods
-make logs       # tail live logs
+task build      # compile locally
+task test       # run tests
+task push       # build+push image only (no deploy)
+task resolve    # render manifest with real digest (for GitOps)
+task deploy     # build+push+apply
+task undeploy   # remove from cluster
+task status     # show ksvc + pods
+task logs       # tail live logs
 ```
