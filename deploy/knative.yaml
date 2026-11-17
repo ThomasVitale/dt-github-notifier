@@ -41,6 +41,8 @@ spec:
       # Hard limit on concurrent requests per pod, bounding memory use (each
       # request may buffer up to 1 MiB). Knative's default, 0, means no limit.
       containerConcurrency: 10
+      # The service never calls the Kubernetes API, so it needs no token.
+      automountServiceAccountToken: false
       # Maximum duration of a request. Kept above the 8 s the bridge allows itself
       # per notification (Dependency-Track waits 10 s for a webhook response), so
       # Knative never cuts off a request the bridge is still handling.

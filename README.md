@@ -301,8 +301,8 @@ data that anyone able to upload a BOM can influence. It is designed to fail clos
 - **Network**: `deploy/networkpolicy.yaml` is a starting point for restricting egress to DNS,
   Dependency-Track and GitHub. Test it in your cluster before applying it.
 - **Kubernetes**: the container runs as non-root with a read-only root filesystem and no
-  capabilities. The service needs no Kubernetes API access; if your Knative version accepts
-  `automountServiceAccountToken: false` in the revision spec, set it.
+  capabilities, and no service account token is mounted, since the service never calls the
+  Kubernetes API.
 - **Logs**: secrets are never logged. Logs contain notification titles, repositories, issue URLs
   and the source address of rejected requests.
 
