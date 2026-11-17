@@ -38,21 +38,13 @@ spec:
       # from blocking the scale-down.
       timeoutSeconds: 10
  
-      # Drop all Linux capabilities — the binary needs none.
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 65532   # nonroot user in cgr.dev/chainguard/static
-        runAsGroup: 65532
-        seccompProfile:
-          type: RuntimeDefault
- 
       containers:
         - name: bridge
           # ko replaces this placeholder with the real digest at deploy time.
           # See Makefile targets: make deploy / make resolve.
           image: ko://github.com/thomasvitale/dt-github-notifier
           ports:
-            - name: h2c       # use h2c (HTTP/2 cleartext) — Knative default
+            - name: http1     # HTTP/1.1 — matches Go's net/http default server
               containerPort: 8080
           env:
             - name: GITHUB_TOKEN
@@ -67,17 +59,20 @@ spec:
               value: ""                 # optional fallback, e.g. "myorg/myrepo"
             - name: DT_BASE_URL
               # Internal cluster DNS — same namespace as Dependency-Track.
-              value: "http://dependency-track-apiserver.dependency-track.svc.cluster.local"
+              value: "http://dependency-track-api-server.dependency-track.svc.cluster.local:8080"
             - name: DT_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: dt-github-notifier-secret
                   key: dt-api-key
           securityContext:
+            runAsNonRoot: true
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           resources:
             requests:
               cpu: 20m

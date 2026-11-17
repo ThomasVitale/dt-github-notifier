@@ -26,7 +26,7 @@ func configFromEnv() (config, error) {
 		return config{}, errors.New("GITHUB_TOKEN env var is required")
 	}
 	if cfg.DTBaseURL == "" {
-		return config{}, errors.New("DT_BASE_URL env var is required (e.g. http://dependency-track-apiserver.dependency-track.svc.cluster.local)")
+		return config{}, errors.New("DT_BASE_URL env var is required (e.g. http://dependency-track-api-server.dependency-track.svc.cluster.local:8080)")
 	}
 	if cfg.DTAPIKey == "" {
 		return config{}, errors.New("DT_API_KEY env var is required")

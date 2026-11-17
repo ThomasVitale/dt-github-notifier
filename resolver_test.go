@@ -37,10 +37,10 @@ func newTestResolver(fetcher projectFetcher, defaultRepo string) *repoResolver {
 func TestRepoFromURL(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name    string
-		url     string
-		want    string
-		wantOK  bool
+		name   string
+		url    string
+		want   string
+		wantOK bool
 	}{
 		{
 			name:   "https with path",

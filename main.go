@@ -9,7 +9,6 @@ import (
 	dtrack "github.com/DependencyTrack/client-go"
 )
 
-
 func main() {
 	cfg, err := configFromEnv()
 	if err != nil {

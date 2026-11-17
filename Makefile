@@ -38,11 +38,11 @@ push:
 ## resolve: render knative.yaml with the real image digest substituted in
 ## Useful for GitOps — commit the output to your manifest repo.
 resolve:
-	ko resolve --platform=$(KO_DEFAULTPLATFORMS) -f knative.yaml
+	ko resolve --platform=$(KO_DEFAULTPLATFORMS) --bare -f knative.yaml
 
 ## deploy: build, push, and apply the Knative Service to the cluster
 deploy:
-	ko apply --platform=$(KO_DEFAULTPLATFORMS) -f knative.yaml
+	ko apply --platform=$(KO_DEFAULTPLATFORMS) --bare -f knative.yaml
 
 ## undeploy: remove the Knative Service from the cluster
 undeploy:
