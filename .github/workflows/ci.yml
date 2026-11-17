@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
 
 permissions:
@@ -10,7 +11,8 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel a release halfway through publishing
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   ci:
@@ -37,9 +39,85 @@ jobs:
         run: devenv shell -- task test
 
       - name: Build image
-        # The image is built but never pushed. Image repositories must be
+        # The image is built but not pushed. Image repositories must be
         # lowercase, while github.repository keeps the owner's capitalization.
         run: |
           KO_DOCKER_REPO="ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
           export KO_DOCKER_REPO
           devenv shell -- ko build --push=false --bare --platform=linux/amd64,linux/arm64 .
+
+  publish:
+    name: Publish image
+    # Pushes to main publish :main and :sha-<commit>; version tags publish
+    # :<version> and :latest and create a GitHub release.
+    if: github.event_name == 'push'
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write     # create the GitHub release
+      packages: write     # push to ghcr.io
+      id-token: write     # keyless signing and provenance attestation
+      attestations: write # store the provenance attestation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        with:
+          name: devenv
+      - name: Install devenv
+        run: nix profile install nixpkgs#devenv
+
+      - name: Build and push image
+        id: image
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          KO_DOCKER_REPO="ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAGS="${GITHUB_REF_NAME#v},latest"
+          else
+            TAGS="main,sha-${GITHUB_SHA::7}"
+          fi
+          export KO_DOCKER_REPO TAGS
+          # The variables are expanded by the inner bash, inside the devenv shell
+          # shellcheck disable=SC2016
+          devenv shell -- bash -euo pipefail -c '
+            echo "$GITHUB_TOKEN" | ko login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+            ko build --bare --platform=linux/amd64,linux/arm64 --tags="$TAGS" \
+              --image-label="org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+              --image-label="org.opencontainers.image.revision=$GITHUB_SHA" \
+              --image-refs=image-refs.txt .
+          '
+          ref=$(head -n1 image-refs.txt)
+          echo "name=$KO_DOCKER_REPO" >> "$GITHUB_OUTPUT"
+          echo "digest=${ref##*@}" >> "$GITHUB_OUTPUT"
+          echo "Published \`$KO_DOCKER_REPO@${ref##*@}\` with tags \`$TAGS\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Sign image
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}@${{ steps.image.outputs.digest }}
+        run: devenv shell -- cosign sign --yes "$IMAGE"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ steps.image.outputs.name }}@${{ steps.image.outputs.digest }}
+        run: |
+          # The Knative manifest with the image pinned by digest, for GitOps
+          sed "s|image: ko://.*|image: $IMAGE|" deploy/knative.yaml > knative.yaml
+          grep -q "image: $IMAGE" knative.yaml
+          gh release create "$GITHUB_REF_NAME" knative.yaml \
+            --repo "$GITHUB_REPOSITORY" --generate-notes --verify-tag \
+            --notes "Image: \`$IMAGE\`"

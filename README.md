@@ -130,13 +130,40 @@ All tasks are defined in `Taskfile.yml` and run with [Task](https://taskfile.dev
 
 ---
 
+## Container image
+
+CI publishes a multi-arch (linux/amd64, linux/arm64) image to
+[`ghcr.io/thomasvitale/dt-github-notifier`](https://github.com/ThomasVitale/dt-github-notifier/pkgs/container/dt-github-notifier),
+only after checks and tests pass:
+
+| Trigger | Tags |
+|---|---|
+| Push to `main` | `main`, `sha-<commit>` |
+| Version tag `vX.Y.Z` | `X.Y.Z`, `latest`, plus a GitHub release |
+
+Every image carries an SPDX SBOM, a keyless [cosign](https://github.com/sigstore/cosign) signature
+and a build provenance attestation, all tied to this repository's CI workflow. Verify them with:
+
+```bash
+cosign verify ghcr.io/thomasvitale/dt-github-notifier:<version> \
+  --certificate-identity-regexp '^https://github.com/ThomasVitale/dt-github-notifier/\.github/workflows/ci\.yml@refs/(heads/main|tags/v.+)$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+gh attestation verify oci://ghcr.io/thomasvitale/dt-github-notifier:<version> \
+  --repo ThomasVitale/dt-github-notifier
+```
+
+To publish a release, push a version tag:
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0
+```
+
+---
+
 ## Deploying
 
-### 1. Edit deploy/knative.yaml
-
-Optionally set the `GITHUB_REPO` fallback, and adjust `DT_BASE_URL` to your Dependency-Track API server.
-
-### 2. Create the secret
+### 1. Create the secret
 
 ```bash
 GITHUB_TOKEN=ghp_yourTokenHere DT_API_KEY=xxx DT_WEBHOOK_SECRET=xxx task secret
@@ -145,36 +172,39 @@ GITHUB_TOKEN=ghp_yourTokenHere DT_API_KEY=xxx DT_WEBHOOK_SECRET=xxx task secret
 `DT_WEBHOOK_SECRET` is optional, but without it anyone able to reach the service inside the
 cluster can make it open issues.
 
-### 3. Log in to your registry
+### 2. Deploy a release
+
+Each GitHub release has a `knative.yaml` asset: `deploy/knative.yaml` with the image pinned by
+digest. Download it, adjust it if needed (`DT_BASE_URL`, the optional `GITHUB_REPO` fallback),
+and apply it, or commit it to your GitOps repository:
 
 ```bash
-ko login ghcr.io -u $GITHUB_USER --password-stdin <<< $GITHUB_TOKEN
+curl -fsSLO https://github.com/ThomasVitale/dt-github-notifier/releases/download/v1.0.0/knative.yaml
+kubectl apply -f knative.yaml
 ```
 
-### 4. Build, push, and deploy in one command
-
-```bash
-KO_DOCKER_REPO=ghcr.io/myorg/dt-github-notifier task deploy
-```
-
-ko apply will cross-compile for linux/amd64 and linux/arm64, push a multi-arch manifest,
-substitute the real image digest into deploy/knative.yaml, and apply it to the cluster.
-
-### 5. Verify
+### 3. Verify
 
 ```bash
 task status
 ```
 
----
+### Building and deploying your own image
 
-## GitOps / CI - render manifests without applying
+To deploy local changes, build and push the image to your own registry with ko and apply
+`deploy/knative.yaml` in one step:
 
 ```bash
-KO_DOCKER_REPO=ghcr.io/myorg/dt-github-notifier task resolve > release/knative-resolved.yaml
+ko login ghcr.io -u $GITHUB_USER --password-stdin <<< $GITHUB_TOKEN
+KO_DOCKER_REPO=ghcr.io/myorg/dt-github-notifier task deploy
 ```
 
-The resolved file contains the full image digest so your GitOps tooling can apply it directly.
+ko cross-compiles for linux/amd64 and linux/arm64, pushes a multi-arch image, substitutes its
+digest into the manifest, and applies it. To render the manifest without applying it:
+
+```bash
+KO_DOCKER_REPO=ghcr.io/myorg/dt-github-notifier task resolve > knative-resolved.yaml
+```
 
 ---
 

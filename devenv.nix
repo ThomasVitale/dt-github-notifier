@@ -15,6 +15,7 @@
     pkgs.kubectl
 
     # Utilities
+    pkgs.cosign
     pkgs.go-task
     pkgs.jq
   ];
