@@ -34,7 +34,6 @@ These groups open an issue:
 |---|---|
 | `POLICY_VIOLATION` | `security`, `policy-violation`, `dependency-track`, `violation-state:<state>` |
 | `NEW_VULNERABILITY` | `security`, `vulnerability`, `dependency-track`, `severity:<level>` |
-| `NEW_VULNERABLE_DEPENDENCY` | `security`, `vulnerable-dependency`, `dependency-track` |
 
 These groups close the open issue about a finding once it no longer needs action, with a comment
 explaining why:
@@ -46,11 +45,12 @@ explaining why:
 | `PROJECT_AUDIT_CHANGE` | a policy violation is analyzed as `APPROVED`, or suppressed | not planned |
 | `VULNERABILITY_RETRACTED` | a reported vulnerability no longer applies to the component | not planned |
 
-Other audit decisions (`IN_TRIAGE`, `EXPLOITABLE`, `REJECTED`) leave the issue open. Issues opened
-for `NEW_VULNERABLE_DEPENDENCY` cover several vulnerabilities at once, so they are not closed
-automatically. A new notification for a finding whose issue was closed opens a new issue.
+Other audit decisions (`IN_TRIAGE`, `EXPLOITABLE`, `REJECTED`) leave the issue open. A new
+notification for a finding whose issue was closed opens a new issue.
 
-All other groups are acknowledged and ignored (HTTP 204).
+All other groups are acknowledged and ignored (HTTP 204). This includes `NEW_VULNERABLE_DEPENDENCY`:
+each vulnerability it lists also arrives as a `NEW_VULNERABILITY` notification, whose issue is
+closed automatically once the vulnerability is resolved.
 
 The service expects the payload produced by the default template of the Dependency-Track v5
 [Webhook publisher](https://dependencytrack.github.io/docs/next/reference/notifications/publishers/#webhook)
@@ -82,7 +82,6 @@ Every issue carries a key that identifies the finding, shown in its footer
 | DT Group | Finding |
 |---|---|
 | `NEW_VULNERABILITY` | project + component + vulnerability |
-| `NEW_VULNERABLE_DEPENDENCY` | project + component |
 | `POLICY_VIOLATION` | project + component + policy condition |
 
 Before creating an issue, the service searches the repository for an **open** issue with the same
@@ -245,8 +244,8 @@ In Administration → Notifications → Alerts, create an alert
 - Level: INFORMATIONAL
 - Publisher: Webhook (default template, *Publish Protobuf* disabled)
 - Trigger: Event
-- Groups: POLICY_VIOLATION, NEW_VULNERABILITY, NEW_VULNERABLE_DEPENDENCY, and, to close issues
-  automatically, PROJECT_AUDIT_CHANGE and VULNERABILITY_RETRACTED
+- Groups: POLICY_VIOLATION, NEW_VULNERABILITY, and, to close issues automatically,
+  PROJECT_AUDIT_CHANGE and VULNERABILITY_RETRACTED
 - Destination URL: http://dt-github-notifier.dependency-track.svc.cluster.local/webhook
 - Signing Secret (Dependency-Track 5.2+): a managed secret holding the same value as `DT_WEBHOOK_SECRET`
 
@@ -291,7 +290,7 @@ GitHub App) avoids attributing them to a person.
 
 Create these labels in your repo before first use:
 
-  security, dependency-track, policy-violation, vulnerability, vulnerable-dependency,
+  security, dependency-track, policy-violation, vulnerability,
   severity:critical, severity:high, severity:medium, severity:low,
   violation-state:fail, violation-state:warn, violation-state:info
 

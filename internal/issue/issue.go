@@ -87,13 +87,6 @@ func ForNewVulnerability(s notification.NewVulnerabilitySubject) (Issue, error) 
 		})
 }
 
-func ForNewVulnerableDependency(s notification.NewVulnerableDependencySubject) (Issue, error) {
-	key := newKey("new-vulnerable-dependency", s.Project.UUID, s.Component.UUID)
-	return render("new_vulnerable_dependency.md.tmpl", s, key,
-		fmt.Sprintf("[DT] Vulnerable Dependency: %s introduced in %s", componentName(s.Component), projectName(s.Project)),
-		[]string{"security", "vulnerable-dependency", "dependency-track"})
-}
-
 // render executes the named body template and appends the footer with the
 // key. It neutralizes mentions in the title and truncates title and body to
 // the lengths GitHub accepts, keeping the footer so the key stays searchable.

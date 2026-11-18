@@ -62,6 +62,5 @@ func FuzzParse(f *testing.F) {
 		// Decoding any subject must not panic.
 		_, _ = notification.DecodeSubject[notification.PolicyViolationSubject](n)
 		_, _ = notification.DecodeSubject[notification.NewVulnerabilitySubject](n)
-		_, _ = notification.DecodeSubject[notification.NewVulnerableDependencySubject](n)
 	})
 }

@@ -111,7 +111,6 @@ func TestCreatesIssueInResolvedRepo(t *testing.T) {
 		wantLabel string
 	}{
 		{notificationtest.NewVulnerability, "vulnerability"},
-		{notificationtest.NewVulnerableDependency, "vulnerable-dependency"},
 		{notificationtest.PolicyViolation, "policy-violation"},
 	}
 
@@ -199,6 +198,11 @@ func TestResponses(t *testing.T) {
 		{
 			name:       "ignores unhandled group",
 			body:       notificationtest.Payload(t, notificationtest.BOMConsumed),
+			wantStatus: http.StatusNoContent,
+		},
+		{
+			name:       "ignores new vulnerable dependency",
+			body:       notificationtest.Payload(t, notificationtest.NewVulnerableDependency),
 			wantStatus: http.StatusNoContent,
 		},
 		{

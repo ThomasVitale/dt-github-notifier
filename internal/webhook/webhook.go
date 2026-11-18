@@ -78,9 +78,10 @@ type RepoResolver interface {
 }
 
 // Handler turns Dependency-Track notifications into GitHub issues:
-//   - NEW_VULNERABILITY, NEW_VULNERABLE_DEPENDENCY and POLICY_VIOLATION create
-//     an issue, unless an open issue already tracks the same finding (see
-//     issue.Issue.Key)
+//   - NEW_VULNERABILITY and POLICY_VIOLATION create an issue, unless an open
+//     issue already tracks the same finding (see issue.Issue.Key).
+//     NEW_VULNERABLE_DEPENDENCY is not handled: each of its vulnerabilities
+//     also arrives as a NEW_VULNERABILITY notification.
 //   - PROJECT_AUDIT_CHANGE and VULNERABILITY_RETRACTED close the open issue
 //     about the finding, when the audit decision or retraction resolves it
 //
@@ -250,13 +251,6 @@ func plan(n notification.Notification) (action, error) {
 			return action{}, err
 		}
 		i, err := issue.ForNewVulnerability(s)
-		return action{project: s.Project, create: &i}, err
-	case notification.GroupNewVulnerableDependency:
-		s, err := notification.DecodeSubject[notification.NewVulnerableDependencySubject](n)
-		if err != nil {
-			return action{}, err
-		}
-		i, err := issue.ForNewVulnerableDependency(s)
 		return action{project: s.Project, create: &i}, err
 	case notification.GroupProjectAuditChange:
 		s, err := notification.DecodeSubject[notification.ProjectAuditChangeSubject](n)

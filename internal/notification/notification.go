@@ -12,11 +12,10 @@ import (
 )
 
 const (
-	GroupNewVulnerability        = "GROUP_NEW_VULNERABILITY"
-	GroupNewVulnerableDependency = "GROUP_NEW_VULNERABLE_DEPENDENCY"
-	GroupPolicyViolation         = "GROUP_POLICY_VIOLATION"
-	GroupProjectAuditChange      = "GROUP_PROJECT_AUDIT_CHANGE"
-	GroupVulnerabilityRetracted  = "GROUP_VULNERABILITY_RETRACTED"
+	GroupNewVulnerability       = "GROUP_NEW_VULNERABILITY"
+	GroupPolicyViolation        = "GROUP_POLICY_VIOLATION"
+	GroupProjectAuditChange     = "GROUP_PROJECT_AUDIT_CHANGE"
+	GroupVulnerabilityRetracted = "GROUP_VULNERABILITY_RETRACTED"
 )
 
 type Notification struct {
@@ -86,12 +85,6 @@ type NewVulnerabilitySubject struct {
 	Vulnerability Vulnerability `json:"vulnerability"`
 }
 
-type NewVulnerableDependencySubject struct {
-	Component       Component       `json:"component"`
-	Project         Project         `json:"project"`
-	Vulnerabilities []Vulnerability `json:"vulnerabilities"`
-}
-
 type PolicyViolationSubject struct {
 	Component       Component       `json:"component"`
 	Project         Project         `json:"project"`
@@ -148,8 +141,8 @@ func Parse(body []byte) (Notification, error) {
 
 // Subject is the set of subject types of the handled notification groups.
 type Subject interface {
-	NewVulnerabilitySubject | NewVulnerableDependencySubject | PolicyViolationSubject |
-		ProjectAuditChangeSubject | VulnerabilityRetractedSubject
+	NewVulnerabilitySubject | PolicyViolationSubject | ProjectAuditChangeSubject |
+		VulnerabilityRetractedSubject
 }
 
 // DecodeSubject decodes the subject of n into the subject type T.

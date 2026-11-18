@@ -108,16 +108,6 @@ func TestKey(t *testing.T) {
 		}
 		return i.Key
 	}
-	dep := func(project, component string) string {
-		i, err := ForNewVulnerableDependency(notification.NewVulnerableDependencySubject{
-			Project:   notification.Project{UUID: project},
-			Component: notification.Component{UUID: component},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return i.Key
-	}
 
 	k := vuln("p1", "c1", "CVE-1")
 	if !strings.HasPrefix(k, keyPrefix) || len(k) != len(keyPrefix)+32 {
@@ -130,7 +120,7 @@ func TestKey(t *testing.T) {
 		"other project":       vuln("p2", "c1", "CVE-1"),
 		"other component":     vuln("p1", "c2", "CVE-1"),
 		"other vulnerability": vuln("p1", "c1", "CVE-2"),
-		"other group":         dep("p1", "c1"),
+		"other group":         newKey("other-group", "p1", "c1", "NVD", "CVE-1"),
 	} {
 		if other == k {
 			t.Errorf("%s yields the same key", name)
@@ -173,13 +163,6 @@ func TestGolden(t *testing.T) {
 				return Issue{}, err
 			}
 			return ForNewVulnerability(s)
-		}},
-		{notificationtest.NewVulnerableDependency, func(n notification.Notification) (Issue, error) {
-			s, err := notification.DecodeSubject[notification.NewVulnerableDependencySubject](n)
-			if err != nil {
-				return Issue{}, err
-			}
-			return ForNewVulnerableDependency(s)
 		}},
 		{notificationtest.PolicyViolation, func(n notification.Notification) (Issue, error) {
 			s, err := notification.DecodeSubject[notification.PolicyViolationSubject](n)
@@ -278,7 +261,7 @@ func FuzzCodeBlock(f *testing.F) {
 }
 
 // TestOptionalSectionsOmitted checks the template whitespace handling when
-// optional sections (aliases, description, message, list items) are empty.
+// optional sections (aliases, description, message) are empty.
 func TestOptionalSectionsOmitted(t *testing.T) {
 	t.Parallel()
 	footer := func(i Issue) string {
@@ -303,22 +286,6 @@ func TestOptionalSectionsOmitted(t *testing.T) {
 		"| **Component** | `c` |\n" + footer(vuln)
 	if vuln.Body != wantVuln {
 		t.Errorf("new vulnerability body =\n%q\nwant\n%q", vuln.Body, wantVuln)
-	}
-
-	dep, err := ForNewVulnerableDependency(notification.NewVulnerableDependencySubject{
-		Component: notification.Component{Name: "c"},
-		Project:   notification.Project{Name: "p"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantDep := "## :warning: Vulnerable Dependency Introduced\n\n" +
-		"| Field | Value |\n|---|---|\n" +
-		"| **Project** | `p` |\n" +
-		"| **Component** | `c` |\n\n" +
-		"**Vulnerabilities:**\n" + footer(dep)
-	if dep.Body != wantDep {
-		t.Errorf("new vulnerable dependency body =\n%q\nwant\n%q", dep.Body, wantDep)
 	}
 
 	pv, err := ForPolicyViolation(notification.PolicyViolationSubject{})
